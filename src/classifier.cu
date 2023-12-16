@@ -7,7 +7,7 @@
 
 #define PARAMETER_SIZE  (OFFSET21 + 4)
 
-static int mpi_rank, mpi_world_size;
+static int node_idx, num_nodes;
 static int article_size_per_node, articles_per_node;
 
 // Multi-dimensional matrix containing fp32 elements
@@ -81,17 +81,17 @@ void linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
 void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output);
 
 void classifier(float *input_, float *output_, int N) {
-  if (mpi_rank != 0) {
+  if (node_idx != 0) {
     cudaMallocHost((void **)&input_, N * VOCAB_SIZE * MAX_LENGTH * sizeof(float));
     cudaMallocHost((void **)&output_, N * sizeof(float));
   }
 
   MPI_Scatter(
-    input_ + mpi_rank * article_size_per_node, article_size_per_node, MPI_FLOAT,
-    input_ + mpi_rank * article_size_per_node, article_size_per_node, MPI_FLOAT,
+    input_ + node_idx * article_size_per_node, article_size_per_node, MPI_FLOAT,
+    input_ + node_idx * article_size_per_node, article_size_per_node, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 
-  for (int n = mpi_rank * articles_per_node; n < (mpi_rank + 1) * articles_per_node; ++n) {  // N input sentences
+  for (int n = node_idx * articles_per_node; n < (node_idx + 1) * articles_per_node; ++n) {  // N input sentences
 
     // Load one input sentence from input
     Tensor *one_input = new Tensor({1, VOCAB_SIZE, MAX_LENGTH}, input_ + n * VOCAB_SIZE * MAX_LENGTH);
@@ -152,8 +152,8 @@ void classifier(float *input_, float *output_, int N) {
   }  // end N input sentences loop
   
   MPI_Gather(
-    output_ + mpi_rank * articles_per_node, articles_per_node, MPI_FLOAT,
-    output_ + mpi_rank * articles_per_node, articles_per_node, MPI_FLOAT,
+    output_ + node_idx * articles_per_node, articles_per_node, MPI_FLOAT,
+    output_ + node_idx * articles_per_node, articles_per_node, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 }
 
@@ -250,16 +250,16 @@ void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
 }
 
 // load the parameter binary file and store parameters into Tensors
-// Only the first process (root, mpi_rank == 0) has the parameter
+// Only the first process (root, node_idx == 0) has the parameter
 // You must broadcast it to the others
 void initialize_classifier(float *parameter, int N) {
-  MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-  MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
+  MPI_Comm_rank(MPI_COMM_WORLD, &node_idx);
+  MPI_Comm_size(MPI_COMM_WORLD, &num_nodes);
 
-  articles_per_node = N / mpi_world_size;
+  articles_per_node = N / num_nodes;
   article_size_per_node = articles_per_node * VOCAB_SIZE * MAX_LENGTH;
 
-  if (mpi_rank != 0) {
+  if (node_idx != 0) {
     cudaMallocHost((void **)&parameter, PARAMETER_SIZE * sizeof(float));
   }
   MPI_Bcast(parameter, PARAMETER_SIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
