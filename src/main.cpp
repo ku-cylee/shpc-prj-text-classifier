@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <cmath>
 
+#include <cuda_runtime.h>
+
 #include "classifier.h"
 #include "util.h"
 
@@ -59,7 +61,7 @@ int main(int argc, char **argv) {
   if (iam_root) {
     printf(" Loading inputs ... "); fflush(stdout);
     input = (float *) read_binary(input_fname);
-    output = (float *) malloc(N * sizeof(float));
+    cudaMallocHost(&output, N * sizeof(float));
     answer = (float *) read_binary(answer_fname);
     parameter = (float*) read_binary(parameter_fname);
     printf("DONE\n"); fflush(stdout);

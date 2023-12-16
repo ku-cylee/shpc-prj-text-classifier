@@ -58,8 +58,8 @@ dkms.conf
 # End of https://www.toptal.com/developers/gitignore/api/c
 
 .vscode/
-src/main
+src/classifier
+src/data
 bin/
 report/
 report.pdf
-data/

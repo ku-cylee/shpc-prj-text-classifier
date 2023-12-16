@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include <cuda_runtime.h>
+
 #include "util.h"
 #include "classifier.h"
 
@@ -25,7 +27,8 @@ void *read_binary(const char *filename) {
   size_ = ftell(f);
   rewind(f);
 
-  void *buf = malloc(size_);
+  void *buf;
+  cudaMallocHost(&buf, size_);
   size_t ret = fread(buf, 1, size_, f);
   if (ret == 0) {
     printf("[ERROR] Cannot read file \'%s\'\n", filename);
