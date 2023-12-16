@@ -5,7 +5,10 @@
 #include "classifier.h"
 #include "util.h"
 
-static int mpi_rank;
+#define PARAMETER_SIZE  (OFFSET21 + 4)
+
+static int mpi_rank, mpi_world_size;
+static int article_size_per_node, articles_per_node;
 
 // Multi-dimensional matrix containing fp32 elements
 struct Tensor {
@@ -77,71 +80,81 @@ void linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
             bool has_bias);
 void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output);
 
-// Only the first process (root, mpi_rank == 0) has the input and output
-// Parallelization method is totally up to you, but you should gather 
-// the output at rank 0
 void classifier(float *input_, float *output_, int N) {
-  if (mpi_rank == 0) {
-    for (int n = 0; n < N; ++n) {  // N input sentences
+  if (mpi_rank != 0) {
+    cudaMallocHost((void **)&input_, N * VOCAB_SIZE * MAX_LENGTH * sizeof(float));
+    cudaMallocHost((void **)&output_, N * sizeof(float));
+  }
 
-      // Load one input sentence from input
-      Tensor *one_input = new Tensor({1, VOCAB_SIZE, MAX_LENGTH}, input_ + n * VOCAB_SIZE * MAX_LENGTH);
+  MPI_Scatter(
+    input_ + mpi_rank * article_size_per_node, article_size_per_node, MPI_FLOAT,
+    input_ + mpi_rank * article_size_per_node, article_size_per_node, MPI_FLOAT,
+    0, MPI_COMM_WORLD);
 
-      // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
-      conv1d(one_input, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
-      layernorm(a_conv1, gamma_conv1, beta_conv1, a_layernorm1);
-      relu(a_layernorm1, a_relu1);
-      maxpool1d(a_relu1, a_pool1, 3, 3);
+  for (int n = mpi_rank * articles_per_node; n < (mpi_rank + 1) * articles_per_node; ++n) {  // N input sentences
 
-      // Conv block 2 : Conv1d + ReLU + MaxPool1d
-      conv1d(a_pool1, w_conv2, b_conv2, a_conv2, 1, 0, 1, true);
-      relu(a_conv2, a_relu2);
-      maxpool1d(a_relu2, a_pool2, 3, 3);
+    // Load one input sentence from input
+    Tensor *one_input = new Tensor({1, VOCAB_SIZE, MAX_LENGTH}, input_ + n * VOCAB_SIZE * MAX_LENGTH);
 
-      // Conv block 3 : Conv1d + ReLU
-      conv1d(a_pool2, w_conv3, b_conv3, a_conv3, 1, 0, 1, true);
-      relu(a_conv3, a_relu3);
+    // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
+    conv1d(one_input, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
+    layernorm(a_conv1, gamma_conv1, beta_conv1, a_layernorm1);
+    relu(a_layernorm1, a_relu1);
+    maxpool1d(a_relu1, a_pool1, 3, 3);
 
-      // Conv block 4 : Conv1d + ReLU
-      conv1d(a_relu3, w_conv4, b_conv4, a_conv4, 1, 0, 1, true);
-      relu(a_conv4, a_relu4);
+    // Conv block 2 : Conv1d + ReLU + MaxPool1d
+    conv1d(a_pool1, w_conv2, b_conv2, a_conv2, 1, 0, 1, true);
+    relu(a_conv2, a_relu2);
+    maxpool1d(a_relu2, a_pool2, 3, 3);
 
-      // Conv block 5 : Conv1d + ReLU
-      conv1d(a_relu4, w_conv5, b_conv5, a_conv5, 1, 0, 1, true);
-      relu(a_conv5, a_relu5);
+    // Conv block 3 : Conv1d + ReLU
+    conv1d(a_pool2, w_conv3, b_conv3, a_conv3, 1, 0, 1, true);
+    relu(a_conv3, a_relu3);
 
-      // Conv block 6 : Conv1d + LayerNorm + ReLU + MaxPool1d
-      conv1d(a_relu5, w_conv6, b_conv6, a_conv6, 1, 0, 1, true);
-      layernorm(a_conv6, gamma_conv6, beta_conv6, a_layernorm6);
-      relu(a_layernorm6, a_relu6);
-      maxpool1d(a_relu6, a_pool6, 3, 3);
+    // Conv block 4 : Conv1d + ReLU
+    conv1d(a_relu3, w_conv4, b_conv4, a_conv4, 1, 0, 1, true);
+    relu(a_conv4, a_relu4);
 
-      // Collapse
-      collapse(a_pool6, a_collapse);
+    // Conv block 5 : Conv1d + ReLU
+    conv1d(a_relu4, w_conv5, b_conv5, a_conv5, 1, 0, 1, true);
+    relu(a_conv5, a_relu5);
 
-      // FC block 1 : Linear + ReLU
-      linear(a_collapse, w_fc1, b_fc1, a_linear1, true);
-      relu(a_linear1, a_relu7);
+    // Conv block 6 : Conv1d + LayerNorm + ReLU + MaxPool1d
+    conv1d(a_relu5, w_conv6, b_conv6, a_conv6, 1, 0, 1, true);
+    layernorm(a_conv6, gamma_conv6, beta_conv6, a_layernorm6);
+    relu(a_layernorm6, a_relu6);
+    maxpool1d(a_relu6, a_pool6, 3, 3);
 
-      // FC block 2 : Linear + ReLU
-      linear(a_relu7, w_fc2, b_fc2, a_linear2, true);
-      relu(a_linear2, a_relu8);
+    // Collapse
+    collapse(a_pool6, a_collapse);
 
-      // FC block 3 : Linear
-      linear(a_relu8, w_fc3, b_fc3, a_linear3, true);
+    // FC block 1 : Linear + ReLU
+    linear(a_collapse, w_fc1, b_fc1, a_linear1, true);
+    relu(a_linear1, a_relu7);
 
-      float max_val = -1e99f;
-      int max_idx = 0;
-      for (int i = 0; i < a_linear3->num_elem(); ++i) {
-        if (a_linear3->buf[i] > max_val) {
-          max_val = a_linear3->buf[i];
-          max_idx = i;
-        }
+    // FC block 2 : Linear + ReLU
+    linear(a_relu7, w_fc2, b_fc2, a_linear2, true);
+    relu(a_linear2, a_relu8);
+
+    // FC block 3 : Linear
+    linear(a_relu8, w_fc3, b_fc3, a_linear3, true);
+
+    float max_val = -1e99f;
+    int max_idx = 0;
+    for (int i = 0; i < a_linear3->num_elem(); ++i) {
+      if (a_linear3->buf[i] > max_val) {
+        max_val = a_linear3->buf[i];
+        max_idx = i;
       }
+    }
 
-      output_[n] = max_idx;
-    }  // end N input sentences loop
-  }    // if mpi_rank == 0
+    output_[n] = max_idx;
+  }  // end N input sentences loop
+  
+  MPI_Gather(
+    output_ + mpi_rank * articles_per_node, articles_per_node, MPI_FLOAT,
+    output_ + mpi_rank * articles_per_node, articles_per_node, MPI_FLOAT,
+    0, MPI_COMM_WORLD);
 }
 
 void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
@@ -241,103 +254,109 @@ void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
 // You must broadcast it to the others
 void initialize_classifier(float *parameter, int N) {
   MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-  if (mpi_rank == 0) {
-    w_conv1 = new Tensor({256, 70, 7}, parameter + OFFSET0);
-    b_conv1 = new Tensor({256}, parameter + OFFSET1);
-    gamma_conv1 = new Tensor({256, 1008}, parameter + OFFSET2);
-    beta_conv1 = new Tensor({256, 1008}, parameter + OFFSET3);
-    w_conv2 = new Tensor({256, 256, 7}, parameter + OFFSET4);
-    b_conv2 = new Tensor({256}, parameter + OFFSET5);
-    w_conv3 = new Tensor({256, 256, 3}, parameter + OFFSET6);
-    b_conv3 = new Tensor({256}, parameter + OFFSET7);
-    w_conv4 = new Tensor({256, 256, 3}, parameter + OFFSET8);
-    b_conv4 = new Tensor({256}, parameter + OFFSET9);
-    w_conv5 = new Tensor({256, 256, 3}, parameter + OFFSET10);
-    b_conv5 = new Tensor({256}, parameter + OFFSET11);
-    w_conv6 = new Tensor({256, 256, 3}, parameter + OFFSET12);
-    b_conv6 = new Tensor({256}, parameter + OFFSET13);
-    gamma_conv6 = new Tensor({256, 102}, parameter + OFFSET14);
-    beta_conv6 = new Tensor({256, 102}, parameter + OFFSET15);
-    w_fc1 = new Tensor({1024, 8704}, parameter + OFFSET16);
-    b_fc1 = new Tensor({1024}, parameter + OFFSET17);
-    w_fc2 = new Tensor({1024, 1024}, parameter + OFFSET18);
-    b_fc2 = new Tensor({1024}, parameter + OFFSET19);
-    w_fc3 = new Tensor({4, 1024}, parameter + OFFSET20);
-    b_fc3 = new Tensor({4}, parameter + OFFSET21);
+  MPI_Comm_size(MPI_COMM_WORLD, &mpi_world_size);
 
-    a_conv1 = new Tensor({1, 256, 1008});
-    a_layernorm1 = new Tensor({1, 256, 1008});
-    a_relu1 = new Tensor({1, 256, 1008});
-    a_pool1 = new Tensor({1, 256, 336});
-    a_conv2 = new Tensor({1, 256, 330});
-    a_relu2 = new Tensor({1, 256, 330});
-    a_pool2 = new Tensor({1, 256, 110});
-    a_conv3 = new Tensor({1, 256, 108});
-    a_relu3 = new Tensor({1, 256, 108});
-    a_conv4 = new Tensor({1, 256, 106});
-    a_relu4 = new Tensor({1, 256, 106});
-    a_conv5 = new Tensor({1, 256, 104});
-    a_relu5 = new Tensor({1, 256, 104});
-    a_conv6 = new Tensor({1, 256, 102});
-    a_layernorm6 = new Tensor({1, 256, 102});
-    a_relu6 = new Tensor({1, 256, 102});
-    a_pool6 = new Tensor({1, 256, 34});
-    a_collapse = new Tensor({1, 8704});
-    a_linear1 = new Tensor({1, 1024});
-    a_relu7 = new Tensor({1, 1024});
-    a_linear2 = new Tensor({1, 1024});
-    a_relu8 = new Tensor({1, 1024});
-    a_linear3 = new Tensor({1, 4});
+  articles_per_node = N / mpi_world_size;
+  article_size_per_node = articles_per_node * VOCAB_SIZE * MAX_LENGTH;
+
+  if (mpi_rank != 0) {
+    cudaMallocHost((void **)&parameter, PARAMETER_SIZE * sizeof(float));
   }
+  MPI_Bcast(parameter, PARAMETER_SIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
+
+  w_conv1 = new Tensor({256, 70, 7}, parameter + OFFSET0);
+  b_conv1 = new Tensor({256}, parameter + OFFSET1);
+  gamma_conv1 = new Tensor({256, 1008}, parameter + OFFSET2);
+  beta_conv1 = new Tensor({256, 1008}, parameter + OFFSET3);
+  w_conv2 = new Tensor({256, 256, 7}, parameter + OFFSET4);
+  b_conv2 = new Tensor({256}, parameter + OFFSET5);
+  w_conv3 = new Tensor({256, 256, 3}, parameter + OFFSET6);
+  b_conv3 = new Tensor({256}, parameter + OFFSET7);
+  w_conv4 = new Tensor({256, 256, 3}, parameter + OFFSET8);
+  b_conv4 = new Tensor({256}, parameter + OFFSET9);
+  w_conv5 = new Tensor({256, 256, 3}, parameter + OFFSET10);
+  b_conv5 = new Tensor({256}, parameter + OFFSET11);
+  w_conv6 = new Tensor({256, 256, 3}, parameter + OFFSET12);
+  b_conv6 = new Tensor({256}, parameter + OFFSET13);
+  gamma_conv6 = new Tensor({256, 102}, parameter + OFFSET14);
+  beta_conv6 = new Tensor({256, 102}, parameter + OFFSET15);
+  w_fc1 = new Tensor({1024, 8704}, parameter + OFFSET16);
+  b_fc1 = new Tensor({1024}, parameter + OFFSET17);
+  w_fc2 = new Tensor({1024, 1024}, parameter + OFFSET18);
+  b_fc2 = new Tensor({1024}, parameter + OFFSET19);
+  w_fc3 = new Tensor({4, 1024}, parameter + OFFSET20);
+  b_fc3 = new Tensor({4}, parameter + OFFSET21);
+
+  a_conv1 = new Tensor({1, 256, 1008});
+  a_layernorm1 = new Tensor({1, 256, 1008});
+  a_relu1 = new Tensor({1, 256, 1008});
+  a_pool1 = new Tensor({1, 256, 336});
+  a_conv2 = new Tensor({1, 256, 330});
+  a_relu2 = new Tensor({1, 256, 330});
+  a_pool2 = new Tensor({1, 256, 110});
+  a_conv3 = new Tensor({1, 256, 108});
+  a_relu3 = new Tensor({1, 256, 108});
+  a_conv4 = new Tensor({1, 256, 106});
+  a_relu4 = new Tensor({1, 256, 106});
+  a_conv5 = new Tensor({1, 256, 104});
+  a_relu5 = new Tensor({1, 256, 104});
+  a_conv6 = new Tensor({1, 256, 102});
+  a_layernorm6 = new Tensor({1, 256, 102});
+  a_relu6 = new Tensor({1, 256, 102});
+  a_pool6 = new Tensor({1, 256, 34});
+  a_collapse = new Tensor({1, 8704});
+  a_linear1 = new Tensor({1, 1024});
+  a_relu7 = new Tensor({1, 1024});
+  a_linear2 = new Tensor({1, 1024});
+  a_relu8 = new Tensor({1, 1024});
+  a_linear3 = new Tensor({1, 4});
 }
 
 // Free all dynamically allocated variables
 void finalize_classifier() {
-  if (mpi_rank == 0) {
-    delete w_conv1;
-    delete b_conv1;
-    delete w_conv2;
-    delete b_conv2;
-    delete w_conv3;
-    delete b_conv3;
-    delete w_conv4;
-    delete b_conv4;
-    delete w_conv5;
-    delete b_conv5;
-    delete w_conv6;
-    delete b_conv6;
-    delete w_fc1;
-    delete b_fc1;
-    delete w_fc2;
-    delete b_fc2;
-    delete w_fc3;
-    delete b_fc3;
-    delete gamma_conv1;
-    delete gamma_conv6;
-    delete beta_conv1;
-    delete beta_conv6;
-    delete a_conv1;
-    delete a_layernorm1;
-    delete a_relu1;
-    delete a_pool1;
-    delete a_conv2;
-    delete a_relu2;
-    delete a_pool2;
-    delete a_conv3;
-    delete a_relu3;
-    delete a_conv4;
-    delete a_relu4;
-    delete a_conv5;
-    delete a_relu5;
-    delete a_conv6;
-    delete a_layernorm6;
-    delete a_relu6;
-    delete a_pool6;
-    delete a_collapse;
-    delete a_linear1;
-    delete a_relu7;
-    delete a_linear2;
-    delete a_relu8;
-    delete a_linear3;
-  }
+  delete w_conv1;
+  delete b_conv1;
+  delete w_conv2;
+  delete b_conv2;
+  delete w_conv3;
+  delete b_conv3;
+  delete w_conv4;
+  delete b_conv4;
+  delete w_conv5;
+  delete b_conv5;
+  delete w_conv6;
+  delete b_conv6;
+  delete w_fc1;
+  delete b_fc1;
+  delete w_fc2;
+  delete b_fc2;
+  delete w_fc3;
+  delete b_fc3;
+  delete gamma_conv1;
+  delete gamma_conv6;
+  delete beta_conv1;
+  delete beta_conv6;
+  delete a_conv1;
+  delete a_layernorm1;
+  delete a_relu1;
+  delete a_pool1;
+  delete a_conv2;
+  delete a_relu2;
+  delete a_pool2;
+  delete a_conv3;
+  delete a_relu3;
+  delete a_conv4;
+  delete a_relu4;
+  delete a_conv5;
+  delete a_relu5;
+  delete a_conv6;
+  delete a_layernorm6;
+  delete a_relu6;
+  delete a_pool6;
+  delete a_collapse;
+  delete a_linear1;
+  delete a_relu7;
+  delete a_linear2;
+  delete a_relu8;
+  delete a_linear3;
 }
