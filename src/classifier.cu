@@ -7,6 +7,7 @@
 
 #define PARAMETER_SIZE  (OFFSET21 + 4)
 
+static int batch_size;
 static int node_idx, num_nodes;
 static int article_size_per_node, articles_per_node;
 
@@ -91,10 +92,10 @@ void classifier(float *input_, float *output_, int N) {
     input_ + node_idx * article_size_per_node, article_size_per_node, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 
-  for (int n = node_idx * articles_per_node; n < (node_idx + 1) * articles_per_node; ++n) {  // N input sentences
+  // for (int n = node_idx * articles_per_node; n < (node_idx + 1) * articles_per_node; ++n) {  // N input sentences
 
     // Load one input sentence from input
-    Tensor *one_input = new Tensor({1, VOCAB_SIZE, MAX_LENGTH}, input_ + n * VOCAB_SIZE * MAX_LENGTH);
+    Tensor *one_input = new Tensor({batch_size, VOCAB_SIZE, MAX_LENGTH}, input_ + node_idx * article_size_per_node);
 
     // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
     conv1d(one_input, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
@@ -139,17 +140,20 @@ void classifier(float *input_, float *output_, int N) {
     // FC block 3 : Linear
     linear(a_relu8, w_fc3, b_fc3, a_linear3, true);
 
-    float max_val = -1e99f;
-    int max_idx = 0;
-    for (int i = 0; i < a_linear3->num_elem(); ++i) {
-      if (a_linear3->buf[i] > max_val) {
-        max_val = a_linear3->buf[i];
-        max_idx = i;
+    for (int b = 0; b < batch_size; ++b) {
+      float max_val = -1e99f;
+      int max_idx = 0;
+      for (int i = 0; i < a_linear3->shape[1]; ++i) {
+        float val = a_linear3->buf[b * a_linear3->shape[1] + i];
+        if (val > max_val) {
+          max_val = val;
+          max_idx = i;
+        }
       }
-    }
 
-    output_[n] = max_idx;
-  }  // end N input sentences loop
+      output_[node_idx * articles_per_node + b] = max_idx;
+    }
+  // }  // end N input sentences loop
   
   MPI_Gather(
     output_ + node_idx * articles_per_node, articles_per_node, MPI_FLOAT,
@@ -167,51 +171,68 @@ void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
   int output_length =
       (input->shape[2] + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
-  for (int oc = 0; oc < out_channels; ++oc) {
-    for (int ol = 0; ol < output_length; ++ol) {
-      float val = 0.0f;
-      int offset = ol;
-      for (int ic = 0; ic < in_channels; ++ic) {
-        for (int ks = 0; ks < kernel_size; ++ks) {
-          val += weight->buf[oc * in_channels * kernel_size + ic * kernel_size + ks] *
-                 input->buf[ic * input_length + ks + offset];
+  int in_elem_per_batch = input->num_elem() / batch_size;
+  int out_elem_per_batch = output->num_elem() / batch_size;
+
+  for (int b = 0; b < batch_size; ++b) {
+    for (int oc = 0; oc < out_channels; ++oc) {
+      for (int ol = 0; ol < output_length; ++ol) {
+        float val = 0.0f;
+        int offset = ol;
+        for (int ic = 0; ic < in_channels; ++ic) {
+          for (int ks = 0; ks < kernel_size; ++ks) {
+            val += weight->buf[oc * in_channels * kernel_size + ic * kernel_size + ks] *
+                  input->buf[b * in_elem_per_batch + ic * input_length + ks + offset];
+          }
         }
+        if (has_bias) val += bias->buf[oc];
+        output->buf[b * out_elem_per_batch + oc * output_length + ol] = val;
       }
-      if (has_bias) val += bias->buf[oc];
-      output->buf[oc * output_length + ol] = val;
     }
   }
 }
 
 void relu(Tensor *input, Tensor *output) {
-  for (int i = 0; i < input->num_elem(); ++i) {
-    if (input->buf[i] > 0.0f)
-      output->buf[i] = input->buf[i];
-    else
-      output->buf[i] = 0.0f;
+  int elem_per_batch = input->num_elem() / batch_size;
+
+  for (int b = 0; b < batch_size; ++b) {
+    for (int i = 0; i < elem_per_batch; ++i) {
+      int idx = b * elem_per_batch + i;
+      float input_val = input->buf[idx];
+      output->buf[idx] = input_val > 0.0f ? input_val : 0.0f;
+    }
   }
 }
 
 void maxpool1d(Tensor *input, Tensor *output, int kernel_size, int stride) {
+  int IC = input->shape[1];
   int IL = input->shape[2];
   int OC = output->shape[1];
   int OL = output->shape[2];
 
-  for (int oc = 0; oc < OC; ++oc) {
-    for (int ol = 0; ol < OL; ++ol) {
-      float mx = -1e99;
-      for (int ks = 0; ks < kernel_size; ++ks) {
-        float val = input->buf[oc * IL + ks + ol * stride];
-        if (val > mx) mx = val;
+  for (int b = 0; b < batch_size; ++b) {
+    for (int oc = 0; oc < OC; ++oc) {
+      for (int ol = 0; ol < OL; ++ol) {
+        float mx = -1e99;
+        for (int ks = 0; ks < kernel_size; ++ks) {
+          float val = input->buf[(b * IC + oc) * IL + ks + ol * stride];
+          if (val > mx) mx = val;
+        }
+
+        output->buf[(b * OC + oc) * OL + ol] = mx;
       }
-      output->buf[oc * OL + ol] = mx;
     }
   }
 }
 
 void collapse(Tensor *input, Tensor *output) {
-  for (int i = 0; i < input->num_elem(); ++i) {
-    output->buf[i] = input->buf[i];
+  int elem_per_batch = input->num_elem() / batch_size;
+
+  for (int b = 0; b < batch_size; ++b) {
+    for (int i = 0; i < elem_per_batch; ++i) {
+      int idx = b * elem_per_batch + i;
+      output->buf[idx] = input->buf[idx];
+    }
   }
 }
 
@@ -220,32 +241,40 @@ void linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
   int IC = input->shape[1];
   int OC = output->shape[1];
 
-  for (int oc = 0; oc < OC; ++oc) {
-    float val = 0.0;
-    for (int ic = 0; ic < IC; ++ic) {
-      val += input->buf[ic] * weight->buf[oc * IC + ic];
+  for (int b = 0; b < batch_size; ++b) {
+    for (int oc = 0; oc < OC; ++oc) {
+      float val = 0.0;
+      for (int ic = 0; ic < IC; ++ic) {
+        val += input->buf[b * IC + ic] * weight->buf[oc * IC + ic];
+      }
+      if (has_bias) val += bias->buf[oc];
+      output->buf[b * OC + oc] = val;
     }
-    if (has_bias) val += bias->buf[oc];
-    output->buf[oc] = val;
   }
 }
 
 void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
   // E[X], E[X^2]
-  float sum1 = 0.0f, sum2 = 0.0f;
-  for (int i = 0; i < input->num_elem(); ++i) {
-      sum1 += input->buf[i];
-      sum2 += input->buf[i] * input->buf[i];
-  }
-  float mean1 = sum1 / (float)input->num_elem();
-  float mean2 = sum2 / (float)input->num_elem();
+  int elem_per_batch = input->num_elem() / batch_size;
 
-  // V[X]
-  float var = mean2 - mean1 * mean1; 
+  for (int b = 0; b < batch_size; ++b) {
+    float sum1 = 0.0f, sum2 = 0.0f;
+    for (int i = 0; i < elem_per_batch; ++i) {
+      float val = input->buf[b * elem_per_batch + i];
+      sum1 += val;
+      sum2 += val * val;
+    }
+    float mean1 = sum1 / (float)elem_per_batch;
+    float mean2 = sum2 / (float)elem_per_batch;
 
-  // Normalization
-  for (int i = 0; i < input->num_elem(); ++i) {
-    output->buf[i] = (input->buf[i] - mean1) / sqrtf(var + 1e-5) * gamma->buf[i] + beta->buf[i];
+    // V[X]
+    float var = mean2 - mean1 * mean1; 
+
+    // Normalization
+    for (int i = 0; i < elem_per_batch; ++i) {
+      int idx = b * elem_per_batch + i;
+      output->buf[idx] = (input->buf[idx] - mean1) / sqrtf(var + 1e-5) * gamma->buf[i] + beta->buf[i];
+    }
   }
 }
 
@@ -258,6 +287,7 @@ void initialize_classifier(float *parameter, int N) {
 
   articles_per_node = N / num_nodes;
   article_size_per_node = articles_per_node * VOCAB_SIZE * MAX_LENGTH;
+  batch_size = articles_per_node;
 
   if (node_idx != 0) {
     cudaMallocHost((void **)&parameter, PARAMETER_SIZE * sizeof(float));
@@ -287,29 +317,29 @@ void initialize_classifier(float *parameter, int N) {
   w_fc3 = new Tensor({4, 1024}, parameter + OFFSET20);
   b_fc3 = new Tensor({4}, parameter + OFFSET21);
 
-  a_conv1 = new Tensor({1, 256, 1008});
-  a_layernorm1 = new Tensor({1, 256, 1008});
-  a_relu1 = new Tensor({1, 256, 1008});
-  a_pool1 = new Tensor({1, 256, 336});
-  a_conv2 = new Tensor({1, 256, 330});
-  a_relu2 = new Tensor({1, 256, 330});
-  a_pool2 = new Tensor({1, 256, 110});
-  a_conv3 = new Tensor({1, 256, 108});
-  a_relu3 = new Tensor({1, 256, 108});
-  a_conv4 = new Tensor({1, 256, 106});
-  a_relu4 = new Tensor({1, 256, 106});
-  a_conv5 = new Tensor({1, 256, 104});
-  a_relu5 = new Tensor({1, 256, 104});
-  a_conv6 = new Tensor({1, 256, 102});
-  a_layernorm6 = new Tensor({1, 256, 102});
-  a_relu6 = new Tensor({1, 256, 102});
-  a_pool6 = new Tensor({1, 256, 34});
-  a_collapse = new Tensor({1, 8704});
-  a_linear1 = new Tensor({1, 1024});
-  a_relu7 = new Tensor({1, 1024});
-  a_linear2 = new Tensor({1, 1024});
-  a_relu8 = new Tensor({1, 1024});
-  a_linear3 = new Tensor({1, 4});
+  a_conv1 = new Tensor({batch_size, 256, 1008});
+  a_layernorm1 = new Tensor({batch_size, 256, 1008});
+  a_relu1 = new Tensor({batch_size, 256, 1008});
+  a_pool1 = new Tensor({batch_size, 256, 336});
+  a_conv2 = new Tensor({batch_size, 256, 330});
+  a_relu2 = new Tensor({batch_size, 256, 330});
+  a_pool2 = new Tensor({batch_size, 256, 110});
+  a_conv3 = new Tensor({batch_size, 256, 108});
+  a_relu3 = new Tensor({batch_size, 256, 108});
+  a_conv4 = new Tensor({batch_size, 256, 106});
+  a_relu4 = new Tensor({batch_size, 256, 106});
+  a_conv5 = new Tensor({batch_size, 256, 104});
+  a_relu5 = new Tensor({batch_size, 256, 104});
+  a_conv6 = new Tensor({batch_size, 256, 102});
+  a_layernorm6 = new Tensor({batch_size, 256, 102});
+  a_relu6 = new Tensor({batch_size, 256, 102});
+  a_pool6 = new Tensor({batch_size, 256, 34});
+  a_collapse = new Tensor({batch_size, 8704});
+  a_linear1 = new Tensor({batch_size, 1024});
+  a_relu7 = new Tensor({batch_size, 1024});
+  a_linear2 = new Tensor({batch_size, 1024});
+  a_relu8 = new Tensor({batch_size, 1024});
+  a_linear3 = new Tensor({batch_size, 4});
 }
 
 // Free all dynamically allocated variables
