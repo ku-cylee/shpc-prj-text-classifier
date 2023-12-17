@@ -70,6 +70,7 @@ Tensor *a_collapse;
 Tensor *a_linear1, *a_relu7;
 Tensor *a_linear2, *a_relu8;
 Tensor *a_linear3;
+Tensor *a_topone;
 
 // Operations
 void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
@@ -80,6 +81,7 @@ void collapse(Tensor *input, Tensor *output);
 void linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
             bool has_bias);
 void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output);
+void top_one(Tensor *input, Tensor *output);
 
 void classifier(float *input_, float *output_, int N) {
   if (node_idx != 0) {
@@ -140,18 +142,10 @@ void classifier(float *input_, float *output_, int N) {
     // FC block 3 : Linear
     linear(a_relu8, w_fc3, b_fc3, a_linear3, true);
 
-    for (int b = 0; b < batch_size; ++b) {
-      float max_val = -1e99f;
-      int max_idx = 0;
-      for (int i = 0; i < a_linear3->shape[1]; ++i) {
-        float val = a_linear3->buf[b * a_linear3->shape[1] + i];
-        if (val > max_val) {
-          max_val = val;
-          max_idx = i;
-        }
-      }
+    top_one(a_linear3, a_topone);
 
-      output_[node_idx * articles_per_node + b] = max_idx;
+    for (int b = 0; b < batch_size; ++b) {
+      output_[node_idx * articles_per_node + b] = a_topone->buf[b];
     }
   // }  // end N input sentences loop
   
@@ -278,6 +272,24 @@ void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
   }
 }
 
+void top_one(Tensor *input, Tensor *output) {
+  int IC = input->shape[1];
+
+  for (int b = 0; b < batch_size; ++b) {
+    float max_val = -1e99f;
+    int max_idx = 0;
+    for (int i = 0; i < IC; ++i) {
+      float val = input->buf[b * IC + i];
+      if (val > max_val) {
+        max_val = val;
+        max_idx = i;
+      }
+    }
+
+    output->buf[b] = max_idx;
+  }
+}
+
 // load the parameter binary file and store parameters into Tensors
 // Only the first process (root, node_idx == 0) has the parameter
 // You must broadcast it to the others
@@ -340,6 +352,7 @@ void initialize_classifier(float *parameter, int N) {
   a_linear2 = new Tensor({batch_size, 1024});
   a_relu8 = new Tensor({batch_size, 1024});
   a_linear3 = new Tensor({batch_size, 4});
+  a_topone = new Tensor({batch_size});
 }
 
 // Free all dynamically allocated variables
@@ -389,4 +402,5 @@ void finalize_classifier() {
   delete a_linear2;
   delete a_relu8;
   delete a_linear3;
+  delete a_topone;
 }
