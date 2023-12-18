@@ -21,7 +21,7 @@
   cudaFree(TENSOR_NAME);
 
 static int batch_size;
-static int node_idx, num_nodes;
+static int node_id, num_nodes;
 static int num_devices;
 static int article_size_per_node, articles_per_node;
 static int article_size_per_device, articles_per_device;
@@ -116,14 +116,14 @@ void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output);
 void top_one(Tensor *input, Tensor *output);
 
 void classifier(float *input_, float *output_, int N) {
-  if (node_idx != 0) {
+  if (node_id != 0) {
     cudaMallocHost((void **)&input_, N * VOCAB_SIZE * MAX_LENGTH * sizeof(float));
     cudaMallocHost((void **)&output_, N * sizeof(float));
   }
 
   MPI_Scatter(
-    input_ + node_idx * article_size_per_node, article_size_per_node, MPI_FLOAT,
-    input_ + node_idx * article_size_per_node, article_size_per_node, MPI_FLOAT,
+    input_ + node_id * article_size_per_node, article_size_per_node, MPI_FLOAT,
+    input_ + node_id * article_size_per_node, article_size_per_node, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 
   for (int dev_id = 0; dev_id < num_devices; dev_id++) {
@@ -134,7 +134,7 @@ void classifier(float *input_, float *output_, int N) {
     // Load one input sentence from input
     CUDA_NEW_DATA(
       batch_input,
-      input_ + node_idx * article_size_per_node + dev_id * article_size_per_device,
+      input_ + node_id * article_size_per_node + dev_id * article_size_per_device,
       {batch_size, VOCAB_SIZE, MAX_LENGTH});
 
     // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
@@ -186,15 +186,15 @@ void classifier(float *input_, float *output_, int N) {
     cudaMemcpy(out_buf, a_topone[dev_id]->buf, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
 
     for (int b = 0; b < batch_size; ++b) {
-      output_[node_idx * articles_per_node + dev_id * articles_per_device + b] = out_buf[b];
+      output_[node_id * articles_per_node + dev_id * articles_per_device + b] = out_buf[b];
     }
 
     delete[] out_buf;
   }
   
   MPI_Gather(
-    output_ + node_idx * articles_per_node, articles_per_node, MPI_FLOAT,
-    output_ + node_idx * articles_per_node, articles_per_node, MPI_FLOAT,
+    output_ + node_id * articles_per_node, articles_per_node, MPI_FLOAT,
+    output_ + node_id * articles_per_node, articles_per_node, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 }
 
@@ -418,7 +418,7 @@ void top_one(Tensor *input, Tensor *output) {
 }
 
 void initialize_classifier(float *parameter, int N) {
-  MPI_Comm_rank(MPI_COMM_WORLD, &node_idx);
+  MPI_Comm_rank(MPI_COMM_WORLD, &node_id);
   MPI_Comm_size(MPI_COMM_WORLD, &num_nodes);
 
   cudaGetDeviceCount(&num_devices);
@@ -430,7 +430,7 @@ void initialize_classifier(float *parameter, int N) {
 
   batch_size = articles_per_device;
 
-  if (node_idx != 0) {
+  if (node_id != 0) {
     cudaMallocHost((void **)&parameter, PARAMETER_SIZE * sizeof(float));
   }
   MPI_Bcast(parameter, PARAMETER_SIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
