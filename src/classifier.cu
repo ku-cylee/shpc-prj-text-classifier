@@ -22,7 +22,9 @@
 
 static int batch_size;
 static int node_idx, num_nodes;
+static int num_devices;
 static int article_size_per_node, articles_per_node;
+static int article_size_per_device, articles_per_device;
 
 // Multi-dimensional matrix containing fp32 elements
 struct Tensor {
@@ -85,22 +87,22 @@ void Tensor::fill_zeros() {
 }
 
 // Parameters
-Tensor *w_conv1, *w_conv2, *w_conv3, *w_conv4, *w_conv5, *w_conv6, *b_conv1,
-    *b_conv2, *b_conv3, *b_conv4, *b_conv5, *b_conv6, *w_fc1, *w_fc2, *w_fc3,
-    *b_fc1, *b_fc2, *b_fc3, *gamma_conv1, *beta_conv1, *gamma_conv6, *beta_conv6;
+Tensor **w_conv1, **w_conv2, **w_conv3, **w_conv4, **w_conv5, **w_conv6, **b_conv1,
+    **b_conv2, **b_conv3, **b_conv4, **b_conv5, **b_conv6, **w_fc1, **w_fc2, **w_fc3,
+    **b_fc1, **b_fc2, **b_fc3, **gamma_conv1, **beta_conv1, **gamma_conv6, **beta_conv6;
 
 // Activations
-Tensor *a_conv1, *a_layernorm1, *a_relu1, *a_pool1;
-Tensor *a_conv2, *a_relu2, *a_pool2;
-Tensor *a_conv3, *a_relu3;
-Tensor *a_conv4, *a_relu4;
-Tensor *a_conv5, *a_relu5;
-Tensor *a_conv6, *a_layernorm6, *a_relu6, *a_pool6;
-Tensor *a_collapse;
-Tensor *a_linear1, *a_relu7;
-Tensor *a_linear2, *a_relu8;
-Tensor *a_linear3;
-Tensor *a_topone;
+Tensor **a_conv1, **a_layernorm1, **a_relu1, **a_pool1;
+Tensor **a_conv2, **a_relu2, **a_pool2;
+Tensor **a_conv3, **a_relu3;
+Tensor **a_conv4, **a_relu4;
+Tensor **a_conv5, **a_relu5;
+Tensor **a_conv6, **a_layernorm6, **a_relu6, **a_pool6;
+Tensor **a_collapse;
+Tensor **a_linear1, **a_relu7;
+Tensor **a_linear2, **a_relu8;
+Tensor **a_linear3;
+Tensor **a_topone;
 
 // Operations
 void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
@@ -124,68 +126,71 @@ void classifier(float *input_, float *output_, int N) {
     input_ + node_idx * article_size_per_node, article_size_per_node, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 
-  // for (int n = node_idx * articles_per_node; n < (node_idx + 1) * articles_per_node; ++n) {  // N input sentences
+  for (int dev_id = 0; dev_id < num_devices; dev_id++) {
+    cudaSetDevice(dev_id);
 
     Tensor *batch_input;
 
     // Load one input sentence from input
-    CUDA_NEW_DATA(batch_input, input_ + node_idx * article_size_per_node, {batch_size, VOCAB_SIZE, MAX_LENGTH});
+    CUDA_NEW_DATA(
+      batch_input,
+      input_ + node_idx * article_size_per_node + dev_id * article_size_per_device,
+      {batch_size, VOCAB_SIZE, MAX_LENGTH});
 
     // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
-    conv1d(batch_input, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
-    layernorm(a_conv1, gamma_conv1, beta_conv1, a_layernorm1);
-    relu(a_layernorm1, a_relu1);
-    maxpool1d(a_relu1, a_pool1, 3, 3);
+    conv1d(batch_input, w_conv1[dev_id], b_conv1[dev_id], a_conv1[dev_id], 1, 0, 1, true);
+    layernorm(a_conv1[dev_id], gamma_conv1[dev_id], beta_conv1[dev_id], a_layernorm1[dev_id]);
+    relu(a_layernorm1[dev_id], a_relu1[dev_id]);
+    maxpool1d(a_relu1[dev_id], a_pool1[dev_id], 3, 3);
 
     // Conv block 2 : Conv1d + ReLU + MaxPool1d
-    conv1d(a_pool1, w_conv2, b_conv2, a_conv2, 1, 0, 1, true);
-    relu(a_conv2, a_relu2);
-    maxpool1d(a_relu2, a_pool2, 3, 3);
+    conv1d(a_pool1[dev_id], w_conv2[dev_id], b_conv2[dev_id], a_conv2[dev_id], 1, 0, 1, true);
+    relu(a_conv2[dev_id], a_relu2[dev_id]);
+    maxpool1d(a_relu2[dev_id], a_pool2[dev_id], 3, 3);
 
     // Conv block 3 : Conv1d + ReLU
-    conv1d(a_pool2, w_conv3, b_conv3, a_conv3, 1, 0, 1, true);
-    relu(a_conv3, a_relu3);
+    conv1d(a_pool2[dev_id], w_conv3[dev_id], b_conv3[dev_id], a_conv3[dev_id], 1, 0, 1, true);
+    relu(a_conv3[dev_id], a_relu3[dev_id]);
 
     // Conv block 4 : Conv1d + ReLU
-    conv1d(a_relu3, w_conv4, b_conv4, a_conv4, 1, 0, 1, true);
-    relu(a_conv4, a_relu4);
+    conv1d(a_relu3[dev_id], w_conv4[dev_id], b_conv4[dev_id], a_conv4[dev_id], 1, 0, 1, true);
+    relu(a_conv4[dev_id], a_relu4[dev_id]);
 
     // Conv block 5 : Conv1d + ReLU
-    conv1d(a_relu4, w_conv5, b_conv5, a_conv5, 1, 0, 1, true);
-    relu(a_conv5, a_relu5);
+    conv1d(a_relu4[dev_id], w_conv5[dev_id], b_conv5[dev_id], a_conv5[dev_id], 1, 0, 1, true);
+    relu(a_conv5[dev_id], a_relu5[dev_id]);
 
     // Conv block 6 : Conv1d + LayerNorm + ReLU + MaxPool1d
-    conv1d(a_relu5, w_conv6, b_conv6, a_conv6, 1, 0, 1, true);
-    layernorm(a_conv6, gamma_conv6, beta_conv6, a_layernorm6);
-    relu(a_layernorm6, a_relu6);
-    maxpool1d(a_relu6, a_pool6, 3, 3);
+    conv1d(a_relu5[dev_id], w_conv6[dev_id], b_conv6[dev_id], a_conv6[dev_id], 1, 0, 1, true);
+    layernorm(a_conv6[dev_id], gamma_conv6[dev_id], beta_conv6[dev_id], a_layernorm6[dev_id]);
+    relu(a_layernorm6[dev_id], a_relu6[dev_id]);
+    maxpool1d(a_relu6[dev_id], a_pool6[dev_id], 3, 3);
 
     // Collapse
-    collapse(a_pool6, a_collapse);
+    collapse(a_pool6[dev_id], a_collapse[dev_id]);
 
     // FC block 1 : Linear + ReLU
-    linear(a_collapse, w_fc1, b_fc1, a_linear1, true);
-    relu(a_linear1, a_relu7);
+    linear(a_collapse[dev_id], w_fc1[dev_id], b_fc1[dev_id], a_linear1[dev_id], true);
+    relu(a_linear1[dev_id], a_relu7[dev_id]);
 
     // FC block 2 : Linear + ReLU
-    linear(a_relu7, w_fc2, b_fc2, a_linear2, true);
-    relu(a_linear2, a_relu8);
+    linear(a_relu7[dev_id], w_fc2[dev_id], b_fc2[dev_id], a_linear2[dev_id], true);
+    relu(a_linear2[dev_id], a_relu8[dev_id]);
 
     // FC block 3 : Linear
-    linear(a_relu8, w_fc3, b_fc3, a_linear3, true);
+    linear(a_relu8[dev_id], w_fc3[dev_id], b_fc3[dev_id], a_linear3[dev_id], true);
 
-    top_one(a_linear3, a_topone);
+    top_one(a_linear3[dev_id], a_topone[dev_id]);
 
     float *out_buf = new float[batch_size];
-    cudaMemcpy(out_buf, a_topone->buf, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(out_buf, a_topone[dev_id]->buf, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
 
     for (int b = 0; b < batch_size; ++b) {
-      output_[node_idx * articles_per_node + b] = out_buf[b];
+      output_[node_idx * articles_per_node + dev_id * articles_per_device + b] = out_buf[b];
     }
 
     delete[] out_buf;
-
-  // }  // end N input sentences loop
+  }
   
   MPI_Gather(
     output_ + node_idx * articles_per_node, articles_per_node, MPI_FLOAT,
@@ -416,112 +421,216 @@ void initialize_classifier(float *parameter, int N) {
   MPI_Comm_rank(MPI_COMM_WORLD, &node_idx);
   MPI_Comm_size(MPI_COMM_WORLD, &num_nodes);
 
+  cudaGetDeviceCount(&num_devices);
+
   articles_per_node = N / num_nodes;
   article_size_per_node = articles_per_node * VOCAB_SIZE * MAX_LENGTH;
-  batch_size = articles_per_node;
+  articles_per_device = articles_per_node / num_devices;
+  article_size_per_device = articles_per_device * VOCAB_SIZE * MAX_LENGTH;
+
+  batch_size = articles_per_device;
 
   if (node_idx != 0) {
     cudaMallocHost((void **)&parameter, PARAMETER_SIZE * sizeof(float));
   }
   MPI_Bcast(parameter, PARAMETER_SIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-  cudaSetDevice(0);
+  w_conv1 = new Tensor *[num_devices];
+  b_conv1 = new Tensor *[num_devices];
+  gamma_conv1 = new Tensor *[num_devices];
+  beta_conv1 = new Tensor *[num_devices];
+  w_conv2 = new Tensor *[num_devices];
+  b_conv2 = new Tensor *[num_devices];
+  w_conv3 = new Tensor *[num_devices];
+  b_conv3 = new Tensor *[num_devices];
+  w_conv4 = new Tensor *[num_devices];
+  b_conv4 = new Tensor *[num_devices];
+  w_conv5 = new Tensor *[num_devices];
+  b_conv5 = new Tensor *[num_devices];
+  w_conv6 = new Tensor *[num_devices];
+  b_conv6 = new Tensor *[num_devices];
+  gamma_conv6 = new Tensor *[num_devices];
+  beta_conv6 = new Tensor *[num_devices];
+  w_fc1 = new Tensor *[num_devices];
+  b_fc1 = new Tensor *[num_devices];
+  w_fc2 = new Tensor *[num_devices];
+  b_fc2 = new Tensor *[num_devices];
+  w_fc3 = new Tensor *[num_devices];
+  b_fc3 = new Tensor *[num_devices];
+  a_conv1 = new Tensor *[num_devices];
+  a_layernorm1 = new Tensor *[num_devices];
+  a_relu1 = new Tensor *[num_devices];
+  a_pool1 = new Tensor *[num_devices];
+  a_conv2 = new Tensor *[num_devices];
+  a_relu2 = new Tensor *[num_devices];
+  a_pool2 = new Tensor *[num_devices];
+  a_conv3 = new Tensor *[num_devices];
+  a_relu3 = new Tensor *[num_devices];
+  a_conv4 = new Tensor *[num_devices];
+  a_relu4 = new Tensor *[num_devices];
+  a_conv5 = new Tensor *[num_devices];
+  a_relu5 = new Tensor *[num_devices];
+  a_conv6 = new Tensor *[num_devices];
+  a_layernorm6 = new Tensor *[num_devices];
+  a_relu6 = new Tensor *[num_devices];
+  a_pool6 = new Tensor *[num_devices];
+  a_collapse = new Tensor *[num_devices];
+  a_linear1 = new Tensor *[num_devices];
+  a_relu7 = new Tensor *[num_devices];
+  a_linear2 = new Tensor *[num_devices];
+  a_relu8 = new Tensor *[num_devices];
+  a_linear3 = new Tensor *[num_devices];
+  a_topone = new Tensor *[num_devices];
 
-  CUDA_NEW_DATA(w_conv1, parameter + OFFSET0, 256, 70, 7);
-  CUDA_NEW_DATA(b_conv1, parameter + OFFSET1, 256);
-  CUDA_NEW_DATA(gamma_conv1, parameter + OFFSET2, 256, 1008);
-  CUDA_NEW_DATA(beta_conv1, parameter + OFFSET3, 256, 1008);
-  CUDA_NEW_DATA(w_conv2, parameter + OFFSET4, 256, 256, 7);
-  CUDA_NEW_DATA(b_conv2, parameter + OFFSET5, 256);
-  CUDA_NEW_DATA(w_conv3, parameter + OFFSET6, 256, 256, 3);
-  CUDA_NEW_DATA(b_conv3, parameter + OFFSET7, 256);
-  CUDA_NEW_DATA(w_conv4, parameter + OFFSET8, 256, 256, 3);
-  CUDA_NEW_DATA(b_conv4, parameter + OFFSET9, 256);
-  CUDA_NEW_DATA(w_conv5, parameter + OFFSET10, 256, 256, 3);
-  CUDA_NEW_DATA(b_conv5, parameter + OFFSET11, 256);
-  CUDA_NEW_DATA(w_conv6, parameter + OFFSET12, 256, 256, 3);
-  CUDA_NEW_DATA(b_conv6, parameter + OFFSET13, 256);
-  CUDA_NEW_DATA(gamma_conv6, parameter + OFFSET14, 256, 102);
-  CUDA_NEW_DATA(beta_conv6, parameter + OFFSET15, 256, 102);
-  CUDA_NEW_DATA(w_fc1, parameter + OFFSET16, 1024, 8704);
-  CUDA_NEW_DATA(b_fc1, parameter + OFFSET17, 1024);
-  CUDA_NEW_DATA(w_fc2, parameter + OFFSET18, 1024, 1024);
-  CUDA_NEW_DATA(b_fc2, parameter + OFFSET19, 1024);
-  CUDA_NEW_DATA(w_fc3, parameter + OFFSET20, 4, 1024);
-  CUDA_NEW_DATA(b_fc3, parameter + OFFSET21, 4);
+  for (int dev_id = 0; dev_id < num_devices; dev_id++) {
+    cudaSetDevice(dev_id);
 
-  CUDA_NEW(a_conv1, batch_size, 256, 1008);
-  CUDA_NEW(a_layernorm1, batch_size, 256, 1008);
-  CUDA_NEW(a_relu1, batch_size, 256, 1008);
-  CUDA_NEW(a_pool1, batch_size, 256, 336);
-  CUDA_NEW(a_conv2, batch_size, 256, 330);
-  CUDA_NEW(a_relu2, batch_size, 256, 330);
-  CUDA_NEW(a_pool2, batch_size, 256, 110);
-  CUDA_NEW(a_conv3, batch_size, 256, 108);
-  CUDA_NEW(a_relu3, batch_size, 256, 108);
-  CUDA_NEW(a_conv4, batch_size, 256, 106);
-  CUDA_NEW(a_relu4, batch_size, 256, 106);
-  CUDA_NEW(a_conv5, batch_size, 256, 104);
-  CUDA_NEW(a_relu5, batch_size, 256, 104);
-  CUDA_NEW(a_conv6, batch_size, 256, 102);
-  CUDA_NEW(a_layernorm6, batch_size, 256, 102);
-  CUDA_NEW(a_relu6, batch_size, 256, 102);
-  CUDA_NEW(a_pool6, batch_size, 256, 34);
-  CUDA_NEW(a_collapse, batch_size, 8704);
-  CUDA_NEW(a_linear1, batch_size, 1024);
-  CUDA_NEW(a_relu7, batch_size, 1024);
-  CUDA_NEW(a_linear2, batch_size, 1024);
-  CUDA_NEW(a_relu8, batch_size, 1024);
-  CUDA_NEW(a_linear3, batch_size, 4);
-  CUDA_NEW(a_topone, batch_size);
+    CUDA_NEW_DATA(w_conv1[dev_id], parameter + OFFSET0, 256, 70, 7);
+    CUDA_NEW_DATA(b_conv1[dev_id], parameter + OFFSET1, 256);
+    CUDA_NEW_DATA(gamma_conv1[dev_id], parameter + OFFSET2, 256, 1008);
+    CUDA_NEW_DATA(beta_conv1[dev_id], parameter + OFFSET3, 256, 1008);
+    CUDA_NEW_DATA(w_conv2[dev_id], parameter + OFFSET4, 256, 256, 7);
+    CUDA_NEW_DATA(b_conv2[dev_id], parameter + OFFSET5, 256);
+    CUDA_NEW_DATA(w_conv3[dev_id], parameter + OFFSET6, 256, 256, 3);
+    CUDA_NEW_DATA(b_conv3[dev_id], parameter + OFFSET7, 256);
+    CUDA_NEW_DATA(w_conv4[dev_id], parameter + OFFSET8, 256, 256, 3);
+    CUDA_NEW_DATA(b_conv4[dev_id], parameter + OFFSET9, 256);
+    CUDA_NEW_DATA(w_conv5[dev_id], parameter + OFFSET10, 256, 256, 3);
+    CUDA_NEW_DATA(b_conv5[dev_id], parameter + OFFSET11, 256);
+    CUDA_NEW_DATA(w_conv6[dev_id], parameter + OFFSET12, 256, 256, 3);
+    CUDA_NEW_DATA(b_conv6[dev_id], parameter + OFFSET13, 256);
+    CUDA_NEW_DATA(gamma_conv6[dev_id], parameter + OFFSET14, 256, 102);
+    CUDA_NEW_DATA(beta_conv6[dev_id], parameter + OFFSET15, 256, 102);
+    CUDA_NEW_DATA(w_fc1[dev_id], parameter + OFFSET16, 1024, 8704);
+    CUDA_NEW_DATA(b_fc1[dev_id], parameter + OFFSET17, 1024);
+    CUDA_NEW_DATA(w_fc2[dev_id], parameter + OFFSET18, 1024, 1024);
+    CUDA_NEW_DATA(b_fc2[dev_id], parameter + OFFSET19, 1024);
+    CUDA_NEW_DATA(w_fc3[dev_id], parameter + OFFSET20, 4, 1024);
+    CUDA_NEW_DATA(b_fc3[dev_id], parameter + OFFSET21, 4);
+
+    CUDA_NEW(a_conv1[dev_id], batch_size, 256, 1008);
+    CUDA_NEW(a_layernorm1[dev_id], batch_size, 256, 1008);
+    CUDA_NEW(a_relu1[dev_id], batch_size, 256, 1008);
+    CUDA_NEW(a_pool1[dev_id], batch_size, 256, 336);
+    CUDA_NEW(a_conv2[dev_id], batch_size, 256, 330);
+    CUDA_NEW(a_relu2[dev_id], batch_size, 256, 330);
+    CUDA_NEW(a_pool2[dev_id], batch_size, 256, 110);
+    CUDA_NEW(a_conv3[dev_id], batch_size, 256, 108);
+    CUDA_NEW(a_relu3[dev_id], batch_size, 256, 108);
+    CUDA_NEW(a_conv4[dev_id], batch_size, 256, 106);
+    CUDA_NEW(a_relu4[dev_id], batch_size, 256, 106);
+    CUDA_NEW(a_conv5[dev_id], batch_size, 256, 104);
+    CUDA_NEW(a_relu5[dev_id], batch_size, 256, 104);
+    CUDA_NEW(a_conv6[dev_id], batch_size, 256, 102);
+    CUDA_NEW(a_layernorm6[dev_id], batch_size, 256, 102);
+    CUDA_NEW(a_relu6[dev_id], batch_size, 256, 102);
+    CUDA_NEW(a_pool6[dev_id], batch_size, 256, 34);
+    CUDA_NEW(a_collapse[dev_id], batch_size, 8704);
+    CUDA_NEW(a_linear1[dev_id], batch_size, 1024);
+    CUDA_NEW(a_relu7[dev_id], batch_size, 1024);
+    CUDA_NEW(a_linear2[dev_id], batch_size, 1024);
+    CUDA_NEW(a_relu8[dev_id], batch_size, 1024);
+    CUDA_NEW(a_linear3[dev_id], batch_size, 4);
+    CUDA_NEW(a_topone[dev_id], batch_size);
+  }
 }
 
 // Free all dynamically allocated variables
 void finalize_classifier() {
-  CUDA_DELETE(w_conv1);
-  CUDA_DELETE(b_conv1);
-  CUDA_DELETE(w_conv2);
-  CUDA_DELETE(b_conv2);
-  CUDA_DELETE(w_conv3);
-  CUDA_DELETE(b_conv3);
-  CUDA_DELETE(w_conv4);
-  CUDA_DELETE(b_conv4);
-  CUDA_DELETE(w_conv5);
-  CUDA_DELETE(b_conv5);
-  CUDA_DELETE(w_conv6);
-  CUDA_DELETE(b_conv6);
-  CUDA_DELETE(w_fc1);
-  CUDA_DELETE(b_fc1);
-  CUDA_DELETE(w_fc2);
-  CUDA_DELETE(b_fc2);
-  CUDA_DELETE(w_fc3);
-  CUDA_DELETE(b_fc3);
-  CUDA_DELETE(gamma_conv1);
-  CUDA_DELETE(gamma_conv6);
-  CUDA_DELETE(beta_conv1);
-  CUDA_DELETE(beta_conv6);
-  CUDA_DELETE(a_conv1);
-  CUDA_DELETE(a_layernorm1);
-  CUDA_DELETE(a_relu1);
-  CUDA_DELETE(a_pool1);
-  CUDA_DELETE(a_conv2);
-  CUDA_DELETE(a_relu2);
-  CUDA_DELETE(a_pool2);
-  CUDA_DELETE(a_conv3);
-  CUDA_DELETE(a_relu3);
-  CUDA_DELETE(a_conv4);
-  CUDA_DELETE(a_relu4);
-  CUDA_DELETE(a_conv5);
-  CUDA_DELETE(a_relu5);
-  CUDA_DELETE(a_conv6);
-  CUDA_DELETE(a_layernorm6);
-  CUDA_DELETE(a_relu6);
-  CUDA_DELETE(a_pool6);
-  CUDA_DELETE(a_collapse);
-  CUDA_DELETE(a_linear1);
-  CUDA_DELETE(a_relu7);
-  CUDA_DELETE(a_linear2);
-  CUDA_DELETE(a_relu8);
-  CUDA_DELETE(a_linear3);
-  CUDA_DELETE(a_topone);
+  for (int dev_id = 0; dev_id < num_devices; dev_id++) {
+    cudaSetDevice(dev_id);
+    CUDA_DELETE(w_conv1[dev_id]);
+    CUDA_DELETE(b_conv1[dev_id]);
+    CUDA_DELETE(w_conv2[dev_id]);
+    CUDA_DELETE(b_conv2[dev_id]);
+    CUDA_DELETE(w_conv3[dev_id]);
+    CUDA_DELETE(b_conv3[dev_id]);
+    CUDA_DELETE(w_conv4[dev_id]);
+    CUDA_DELETE(b_conv4[dev_id]);
+    CUDA_DELETE(w_conv5[dev_id]);
+    CUDA_DELETE(b_conv5[dev_id]);
+    CUDA_DELETE(w_conv6[dev_id]);
+    CUDA_DELETE(b_conv6[dev_id]);
+    CUDA_DELETE(w_fc1[dev_id]);
+    CUDA_DELETE(b_fc1[dev_id]);
+    CUDA_DELETE(w_fc2[dev_id]);
+    CUDA_DELETE(b_fc2[dev_id]);
+    CUDA_DELETE(w_fc3[dev_id]);
+    CUDA_DELETE(b_fc3[dev_id]);
+    CUDA_DELETE(gamma_conv1[dev_id]);
+    CUDA_DELETE(gamma_conv6[dev_id]);
+    CUDA_DELETE(beta_conv1[dev_id]);
+    CUDA_DELETE(beta_conv6[dev_id]);
+    CUDA_DELETE(a_conv1[dev_id]);
+    CUDA_DELETE(a_layernorm1[dev_id]);
+    CUDA_DELETE(a_relu1[dev_id]);
+    CUDA_DELETE(a_pool1[dev_id]);
+    CUDA_DELETE(a_conv2[dev_id]);
+    CUDA_DELETE(a_relu2[dev_id]);
+    CUDA_DELETE(a_pool2[dev_id]);
+    CUDA_DELETE(a_conv3[dev_id]);
+    CUDA_DELETE(a_relu3[dev_id]);
+    CUDA_DELETE(a_conv4[dev_id]);
+    CUDA_DELETE(a_relu4[dev_id]);
+    CUDA_DELETE(a_conv5[dev_id]);
+    CUDA_DELETE(a_relu5[dev_id]);
+    CUDA_DELETE(a_conv6[dev_id]);
+    CUDA_DELETE(a_layernorm6[dev_id]);
+    CUDA_DELETE(a_relu6[dev_id]);
+    CUDA_DELETE(a_pool6[dev_id]);
+    CUDA_DELETE(a_collapse[dev_id]);
+    CUDA_DELETE(a_linear1[dev_id]);
+    CUDA_DELETE(a_relu7[dev_id]);
+    CUDA_DELETE(a_linear2[dev_id]);
+    CUDA_DELETE(a_relu8[dev_id]);
+    CUDA_DELETE(a_linear3[dev_id]);
+    CUDA_DELETE(a_topone[dev_id]);
+  }
+
+  delete[] w_conv1;
+  delete[] b_conv1;
+  delete[] w_conv2;
+  delete[] b_conv2;
+  delete[] w_conv3;
+  delete[] b_conv3;
+  delete[] w_conv4;
+  delete[] b_conv4;
+  delete[] w_conv5;
+  delete[] b_conv5;
+  delete[] w_conv6;
+  delete[] b_conv6;
+  delete[] w_fc1;
+  delete[] b_fc1;
+  delete[] w_fc2;
+  delete[] b_fc2;
+  delete[] w_fc3;
+  delete[] b_fc3;
+  delete[] gamma_conv1;
+  delete[] gamma_conv6;
+  delete[] beta_conv1;
+  delete[] beta_conv6;
+  delete[] a_conv1;
+  delete[] a_layernorm1;
+  delete[] a_relu1;
+  delete[] a_pool1;
+  delete[] a_conv2;
+  delete[] a_relu2;
+  delete[] a_pool2;
+  delete[] a_conv3;
+  delete[] a_relu3;
+  delete[] a_conv4;
+  delete[] a_relu4;
+  delete[] a_conv5;
+  delete[] a_relu5;
+  delete[] a_conv6;
+  delete[] a_layernorm6;
+  delete[] a_relu6;
+  delete[] a_pool6;
+  delete[] a_collapse;
+  delete[] a_linear1;
+  delete[] a_relu7;
+  delete[] a_linear2;
+  delete[] a_relu8;
+  delete[] a_linear3;
+  delete[] a_topone;
 }
