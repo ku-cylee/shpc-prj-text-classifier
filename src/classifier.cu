@@ -86,6 +86,9 @@ void Tensor::fill_zeros() {
   for (int n = 0; n < N_; ++n) { buf[n] = 0.0; }
 }
 
+Tensor **input_tensor;
+float **out_buffer;
+
 // Parameters
 Tensor **w_conv1, **w_conv2, **w_conv3, **w_conv4, **w_conv5, **w_conv6, **b_conv1,
     **b_conv2, **b_conv3, **b_conv4, **b_conv5, **b_conv6, **w_fc1, **w_fc2, **w_fc3,
@@ -129,16 +132,14 @@ void classifier(float *input_, float *output_, int N) {
   for (int dev_id = 0; dev_id < num_devices; dev_id++) {
     cudaSetDevice(dev_id);
 
-    Tensor *batch_input;
-
-    // Load one input sentence from input
-    CUDA_NEW_DATA(
-      batch_input,
+    cudaMemcpy(
+      input_tensor[dev_id]->buf,
       input_ + node_id * article_size_per_node + dev_id * article_size_per_device,
-      {batch_size, VOCAB_SIZE, MAX_LENGTH});
+      sizeof(float) * batch_size * VOCAB_SIZE * MAX_LENGTH,
+      cudaMemcpyHostToDevice);
 
     // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
-    conv1d(batch_input, w_conv1[dev_id], b_conv1[dev_id], a_conv1[dev_id], 1, 0, 1, true);
+    conv1d(input_tensor[dev_id], w_conv1[dev_id], b_conv1[dev_id], a_conv1[dev_id], 1, 0, 1, true);
     layernorm(a_conv1[dev_id], gamma_conv1[dev_id], beta_conv1[dev_id], a_layernorm1[dev_id]);
     relu(a_layernorm1[dev_id], a_relu1[dev_id]);
     maxpool1d(a_relu1[dev_id], a_pool1[dev_id], 3, 3);
@@ -182,14 +183,15 @@ void classifier(float *input_, float *output_, int N) {
 
     top_one(a_linear3[dev_id], a_topone[dev_id]);
 
-    float *out_buf = new float[batch_size];
-    cudaMemcpy(out_buf, a_topone[dev_id]->buf, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(
+      out_buffer[dev_id],
+      a_topone[dev_id]->buf,
+      batch_size * sizeof(float),
+      cudaMemcpyDeviceToHost);
 
     for (int b = 0; b < batch_size; ++b) {
-      output_[node_id * articles_per_node + dev_id * articles_per_device + b] = out_buf[b];
+      output_[node_id * articles_per_node + dev_id * articles_per_device + b] = out_buffer[dev_id][b];
     }
-
-    delete[] out_buf;
   }
   
   MPI_Gather(
@@ -457,6 +459,9 @@ void initialize_classifier(float *parameter, int N) {
   b_fc2 = new Tensor *[num_devices];
   w_fc3 = new Tensor *[num_devices];
   b_fc3 = new Tensor *[num_devices];
+
+  input_tensor = new Tensor *[num_devices];
+
   a_conv1 = new Tensor *[num_devices];
   a_layernorm1 = new Tensor *[num_devices];
   a_relu1 = new Tensor *[num_devices];
@@ -481,6 +486,8 @@ void initialize_classifier(float *parameter, int N) {
   a_relu8 = new Tensor *[num_devices];
   a_linear3 = new Tensor *[num_devices];
   a_topone = new Tensor *[num_devices];
+
+  out_buffer = new float *[num_devices];
 
   for (int dev_id = 0; dev_id < num_devices; dev_id++) {
     cudaSetDevice(dev_id);
@@ -508,6 +515,8 @@ void initialize_classifier(float *parameter, int N) {
     CUDA_NEW_DATA(w_fc3[dev_id], parameter + OFFSET20, 4, 1024);
     CUDA_NEW_DATA(b_fc3[dev_id], parameter + OFFSET21, 4);
 
+    CUDA_NEW(input_tensor[dev_id], batch_size, VOCAB_SIZE, MAX_LENGTH);
+
     CUDA_NEW(a_conv1[dev_id], batch_size, 256, 1008);
     CUDA_NEW(a_layernorm1[dev_id], batch_size, 256, 1008);
     CUDA_NEW(a_relu1[dev_id], batch_size, 256, 1008);
@@ -532,6 +541,8 @@ void initialize_classifier(float *parameter, int N) {
     CUDA_NEW(a_relu8[dev_id], batch_size, 1024);
     CUDA_NEW(a_linear3[dev_id], batch_size, 4);
     CUDA_NEW(a_topone[dev_id], batch_size);
+
+    out_buffer[dev_id] = new float[batch_size];
   }
 }
 
@@ -561,6 +572,9 @@ void finalize_classifier() {
     CUDA_DELETE(gamma_conv6[dev_id]);
     CUDA_DELETE(beta_conv1[dev_id]);
     CUDA_DELETE(beta_conv6[dev_id]);
+
+    CUDA_DELETE(input_tensor[dev_id]);
+
     CUDA_DELETE(a_conv1[dev_id]);
     CUDA_DELETE(a_layernorm1[dev_id]);
     CUDA_DELETE(a_relu1[dev_id]);
@@ -585,6 +599,8 @@ void finalize_classifier() {
     CUDA_DELETE(a_relu8[dev_id]);
     CUDA_DELETE(a_linear3[dev_id]);
     CUDA_DELETE(a_topone[dev_id]);
+
+    delete[] out_buffer[dev_id];
   }
 
   delete[] w_conv1;
@@ -609,6 +625,9 @@ void finalize_classifier() {
   delete[] gamma_conv6;
   delete[] beta_conv1;
   delete[] beta_conv6;
+
+  delete[] input_tensor;
+
   delete[] a_conv1;
   delete[] a_layernorm1;
   delete[] a_relu1;
@@ -633,4 +652,6 @@ void finalize_classifier() {
   delete[] a_relu8;
   delete[] a_linear3;
   delete[] a_topone;
+
+  delete[] out_buffer;
 }
