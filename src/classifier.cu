@@ -6,6 +6,19 @@
 #include "util.h"
 
 #define PARAMETER_SIZE  (OFFSET21 + 4)
+#define GPU_THREADS     8
+
+#define CUDA_MALLOC(TENSOR_NAME, ...)                           \
+  cudaMallocManaged((void **)&TENSOR_NAME, sizeof(Tensor));     \
+  TENSOR_NAME->init_cuda({__VA_ARGS__});
+
+#define CUDA_MALLOC_PARAM(TENSOR_NAME, buf_, ...)               \
+  cudaMallocManaged((void **)&TENSOR_NAME, sizeof(Tensor));     \
+  TENSOR_NAME->init_cuda({__VA_ARGS__}, buf_);
+
+#define CUDA_DELETE(TENSOR_NAME)                                \
+  cudaFree(TENSOR_NAME->buf);                                   \
+  cudaFree(TENSOR_NAME);
 
 static int batch_size;
 static int node_idx, num_nodes;
@@ -16,7 +29,9 @@ struct Tensor {
   Tensor(std::vector<int> shape_);
   Tensor(std::vector<int> shape_, float *buf_);
   ~Tensor();
-  int num_elem();
+  void init_cuda(std::vector<int> shape_);
+  void init_cuda(std::vector<int> shape_, float *buf_);
+  __host__ __device__ int num_elem();
   void fill_zeros();
 
   float *buf = nullptr;
@@ -39,11 +54,26 @@ Tensor::Tensor(std::vector<int> shape_, float *buf_) {
   for (int n = 0; n < N_; ++n) { buf[n] = buf_[n]; }
 }
 
+void Tensor::init_cuda(std::vector<int> shape_) {
+  ndim = shape_.size();
+  for (int i = 0; i < ndim; ++i) shape[i] = shape_[i];
+  int N_ = num_elem();
+  cudaMalloc((void **)&buf, sizeof(float) * N_);
+}
+
+void Tensor::init_cuda(std::vector<int> shape_, float *buf_) {
+  ndim = shape_.size();
+  for (int i = 0; i < ndim; ++i) shape[i] = shape_[i];
+  int N_ = num_elem();
+  cudaMalloc((void **)&buf, sizeof(float) * N_);
+  cudaMemcpy(buf, buf_, sizeof(float) * N_, cudaMemcpyHostToDevice);
+}
+
 Tensor::~Tensor() {
   if (buf != nullptr) free(buf);
 }
 
-int Tensor::num_elem() {
+__host__ __device__ int Tensor::num_elem() {
   int sz = 1;
   for (int i = 0; i < ndim; ++i) { sz *= shape[i]; }
   return sz;
@@ -96,11 +126,13 @@ void classifier(float *input_, float *output_, int N) {
 
   // for (int n = node_idx * articles_per_node; n < (node_idx + 1) * articles_per_node; ++n) {  // N input sentences
 
+    Tensor *batch_input;
+
     // Load one input sentence from input
-    Tensor *one_input = new Tensor({batch_size, VOCAB_SIZE, MAX_LENGTH}, input_ + node_idx * article_size_per_node);
+    CUDA_MALLOC_PARAM(batch_input, input_ + node_idx * article_size_per_node, {batch_size, VOCAB_SIZE, MAX_LENGTH});
 
     // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
-    conv1d(one_input, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
+    conv1d(batch_input, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
     layernorm(a_conv1, gamma_conv1, beta_conv1, a_layernorm1);
     relu(a_layernorm1, a_relu1);
     maxpool1d(a_relu1, a_pool1, 3, 3);
@@ -144,9 +176,15 @@ void classifier(float *input_, float *output_, int N) {
 
     top_one(a_linear3, a_topone);
 
+    float *out_buf = new float[batch_size];
+    cudaMemcpy(out_buf, a_topone->buf, batch_size * sizeof(float), cudaMemcpyDeviceToHost);
+
     for (int b = 0; b < batch_size; ++b) {
-      output_[node_idx * articles_per_node + b] = a_topone->buf[b];
+      output_[node_idx * articles_per_node + b] = out_buf[b];
     }
+
+    delete[] out_buf;
+
   // }  // end N input sentences loop
   
   MPI_Gather(
@@ -155,9 +193,14 @@ void classifier(float *input_, float *output_, int N) {
     0, MPI_COMM_WORLD);
 }
 
-void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
+__global__ void dev_conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
             int stride = 1, int padding = 0, int dilation = 1,
             bool has_bias = true) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  int oc = blockIdx.y * blockDim.y + threadIdx.y;
+  int ol = blockIdx.z * blockDim.z + threadIdx.z;
+
+  int batch_size = input->shape[0];
   int out_channels = weight->shape[0];
   int in_channels = weight->shape[1];
   int kernel_size = weight->shape[2];
@@ -165,134 +208,210 @@ void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
   int output_length =
       (input->shape[2] + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
+  if (b >= batch_size || oc >= out_channels || ol >= output_length) return;
+
   int in_elem_per_batch = input->num_elem() / batch_size;
   int out_elem_per_batch = output->num_elem() / batch_size;
 
-  for (int b = 0; b < batch_size; ++b) {
-    for (int oc = 0; oc < out_channels; ++oc) {
-      for (int ol = 0; ol < output_length; ++ol) {
-        float val = 0.0f;
-        int offset = ol;
-        for (int ic = 0; ic < in_channels; ++ic) {
-          for (int ks = 0; ks < kernel_size; ++ks) {
-            val += weight->buf[oc * in_channels * kernel_size + ic * kernel_size + ks] *
-                  input->buf[b * in_elem_per_batch + ic * input_length + ks + offset];
-          }
-        }
-        if (has_bias) val += bias->buf[oc];
-        output->buf[b * out_elem_per_batch + oc * output_length + ol] = val;
-      }
+  float val = 0.0f;
+  for (int ic = 0; ic < in_channels; ++ic) {
+    for (int ks = 0; ks < kernel_size; ++ks) {
+      float w = weight->buf[oc * in_channels * kernel_size + ic * kernel_size + ks];
+      float i = input->buf[b * in_elem_per_batch + ic * input_length + ks + ol];
+      val += w * i;
     }
   }
+  if (has_bias) val += bias->buf[oc];
+  output->buf[b * out_elem_per_batch + oc * output_length + ol] = val;
+}
+
+void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
+            int stride = 1, int padding = 0, int dilation = 1,
+            bool has_bias = true) {
+
+  int out_channels = weight->shape[0];
+  int output_length =
+      (input->shape[2] + 2 * padding - dilation * (weight->shape[2] - 1) - 1) / stride + 1;
+
+  dim3 blockDim(GPU_THREADS, GPU_THREADS, GPU_THREADS);
+  dim3 gridDim(
+    (batch_size + blockDim.x - 1) / blockDim.x,
+    (out_channels + blockDim.y - 1) / blockDim.y,
+    (output_length + blockDim.z - 1) / blockDim.z);
+  dev_conv1d<<<gridDim, blockDim>>>(input, weight, bias, output, stride, padding, dilation, has_bias);
+}
+
+__global__ void dev_relu(Tensor *input, Tensor *output) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  int i = blockIdx.y * blockDim.y + threadIdx.y;
+
+  int batch_size = input->shape[0];
+  int elem_per_batch = input->num_elem() / batch_size;
+
+  if (b >= batch_size || i >= elem_per_batch) return;
+
+  int idx = b * elem_per_batch + i;
+  float input_val = input->buf[idx];
+  output->buf[idx] = input_val > 0.0f ? input_val : 0.0f;
 }
 
 void relu(Tensor *input, Tensor *output) {
-  int elem_per_batch = input->num_elem() / batch_size;
-
-  for (int b = 0; b < batch_size; ++b) {
-    for (int i = 0; i < elem_per_batch; ++i) {
-      int idx = b * elem_per_batch + i;
-      float input_val = input->buf[idx];
-      output->buf[idx] = input_val > 0.0f ? input_val : 0.0f;
-    }
-  }
+  dim3 blockDim(GPU_THREADS, GPU_THREADS);
+  dim3 gridDim((batch_size + blockDim.x - 1) / blockDim.x, (input->num_elem() / batch_size + blockDim.y - 1) / blockDim.y);
+  dev_relu<<<gridDim, blockDim>>>(input, output);
 }
 
-void maxpool1d(Tensor *input, Tensor *output, int kernel_size, int stride) {
+__global__ void dev_maxpool1d(Tensor *input, Tensor *output, int kernel_size, int stride) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  int oc = blockIdx.y * blockDim.y + threadIdx.y;
+  int ol = blockIdx.z * blockDim.z + threadIdx.z;
+
+  int batch_size = input->shape[0];
   int IC = input->shape[1];
   int IL = input->shape[2];
   int OC = output->shape[1];
   int OL = output->shape[2];
 
-  for (int b = 0; b < batch_size; ++b) {
-    for (int oc = 0; oc < OC; ++oc) {
-      for (int ol = 0; ol < OL; ++ol) {
-        float mx = -1e99;
-        for (int ks = 0; ks < kernel_size; ++ks) {
-          float val = input->buf[(b * IC + oc) * IL + ks + ol * stride];
-          if (val > mx) mx = val;
-        }
+  if (b >= batch_size || oc >= OC || ol >= OL) return;
 
-        output->buf[(b * OC + oc) * OL + ol] = mx;
-      }
-    }
+  float mx = -1e99;
+  for (int ks = 0; ks < kernel_size; ++ks) {
+    float val = input->buf[(b * IC + oc) * IL + ks + ol * stride];
+    if (val > mx) mx = val;
   }
+
+  output->buf[(b * OC + oc) * OL + ol] = mx;
+}
+
+void maxpool1d(Tensor *input, Tensor *output, int kernel_size, int stride) {
+  dim3 blockDim(GPU_THREADS, GPU_THREADS, GPU_THREADS);
+  dim3 gridDim(
+    (batch_size + blockDim.x - 1) / blockDim.x,
+    (output->shape[1] + blockDim.y - 1) / blockDim.y,
+    (output->shape[2] + blockDim.z - 1) / blockDim.z);
+  dev_maxpool1d<<<gridDim, blockDim>>>(input, output, kernel_size, stride);
+}
+
+__global__ void dev_collapse(Tensor *input, Tensor *output) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  int i = blockIdx.y * blockDim.y + threadIdx.y;
+
+  int batch_size = input->shape[0];
+  int elem_per_batch = input->num_elem() / batch_size;
+
+  if (b >= batch_size || i >= elem_per_batch) return;
+
+  int idx = b * elem_per_batch + i;
+  output->buf[idx] = input->buf[idx];
 }
 
 void collapse(Tensor *input, Tensor *output) {
   int elem_per_batch = input->num_elem() / batch_size;
 
-  for (int b = 0; b < batch_size; ++b) {
-    for (int i = 0; i < elem_per_batch; ++i) {
-      int idx = b * elem_per_batch + i;
-      output->buf[idx] = input->buf[idx];
-    }
+  dim3 blockDim(GPU_THREADS, GPU_THREADS);
+  dim3 gridDim(
+    (batch_size + blockDim.x - 1) / blockDim.x,
+    (elem_per_batch + blockDim.y - 1) / blockDim.y);
+  dev_collapse<<<gridDim, blockDim>>>(input, output);
+}
+
+__global__ void dev_linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
+            bool has_bias) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  int oc = blockIdx.y * blockDim.y + threadIdx.y;
+
+  int batch_size = input->shape[0];
+  int IC = input->shape[1];
+  int OC = output->shape[1];
+
+  if (b >= batch_size || oc >= OC) return;
+
+  float val = 0.0;
+  for (int ic = 0; ic < IC; ++ic) {
+    val += input->buf[b * IC + ic] * weight->buf[oc * IC + ic];
   }
+  if (has_bias) val += bias->buf[oc];
+  output->buf[b * OC + oc] = val;
 }
 
 void linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
             bool has_bias) {
-  int IC = input->shape[1];
-  int OC = output->shape[1];
+  dim3 blockDim(GPU_THREADS, GPU_THREADS);
+  dim3 gridDim(
+    (batch_size + blockDim.x - 1) / blockDim.x,
+    (output->shape[1] + blockDim.y - 1) / blockDim.y);
+  dev_linear<<<gridDim, blockDim>>>(input, weight, bias, output, has_bias);
+}
 
-  for (int b = 0; b < batch_size; ++b) {
-    for (int oc = 0; oc < OC; ++oc) {
-      float val = 0.0;
-      for (int ic = 0; ic < IC; ++ic) {
-        val += input->buf[b * IC + ic] * weight->buf[oc * IC + ic];
-      }
-      if (has_bias) val += bias->buf[oc];
-      output->buf[b * OC + oc] = val;
-    }
+__global__ void dev_layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
+  // E[X], E[X^2]
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+
+  int batch_size = input->shape[0];
+  int elem_per_batch = input->num_elem() / batch_size;
+
+  if (b >= batch_size) return;
+
+  float sum1 = 0.0f, sum2 = 0.0f;
+  for (int i = 0; i < elem_per_batch; ++i) {
+    int idx = b * elem_per_batch + i;
+    float val = input->buf[idx];
+    float val_square = val * val;
+    sum1 += val;
+    sum2 += val_square;
+  }
+  float mean1 = sum1 / (float)elem_per_batch;
+  float mean2 = sum2 / (float)elem_per_batch;
+
+  // V[X]
+  float var = mean2 - mean1 * mean1; 
+
+  // Normalization
+  for (int i = 0; i < elem_per_batch; ++i) {
+    int idx = b * elem_per_batch + i;
+    float in = input->buf[idx];
+    float ga = gamma->buf[i];
+    float be = beta->buf[i];
+    output->buf[idx] = (in - mean1) / sqrtf(var + 1e-5) * ga + be;
   }
 }
 
 void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
-  // E[X], E[X^2]
+  dim3 blockDim(GPU_THREADS);
+  dim3 gridDim(
+    (batch_size + blockDim.x - 1) / blockDim.x);
+  dev_layernorm<<<gridDim, blockDim>>>(input, gamma, beta, output);
+}
+
+__global__ void dev_top_one(Tensor *input, Tensor *output) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+
+  int batch_size = input->shape[0];
+  int IC = input->shape[1];
   int elem_per_batch = input->num_elem() / batch_size;
 
-  for (int b = 0; b < batch_size; ++b) {
-    float sum1 = 0.0f, sum2 = 0.0f;
-    for (int i = 0; i < elem_per_batch; ++i) {
-      float val = input->buf[b * elem_per_batch + i];
-      sum1 += val;
-      sum2 += val * val;
-    }
-    float mean1 = sum1 / (float)elem_per_batch;
-    float mean2 = sum2 / (float)elem_per_batch;
+  if (b >= batch_size) return;
 
-    // V[X]
-    float var = mean2 - mean1 * mean1; 
-
-    // Normalization
-    for (int i = 0; i < elem_per_batch; ++i) {
-      int idx = b * elem_per_batch + i;
-      output->buf[idx] = (input->buf[idx] - mean1) / sqrtf(var + 1e-5) * gamma->buf[i] + beta->buf[i];
+  float max_val = -1e99f;
+  int max_idx = 0;
+  for (int i = 0; i < IC; ++i) {
+    float val = input->buf[b * IC + i];
+    if (val > max_val) {
+      max_val = val;
+      max_idx = i;
     }
   }
+
+  output->buf[b] = max_idx;
 }
 
 void top_one(Tensor *input, Tensor *output) {
-  int IC = input->shape[1];
-
-  for (int b = 0; b < batch_size; ++b) {
-    float max_val = -1e99f;
-    int max_idx = 0;
-    for (int i = 0; i < IC; ++i) {
-      float val = input->buf[b * IC + i];
-      if (val > max_val) {
-        max_val = val;
-        max_idx = i;
-      }
-    }
-
-    output->buf[b] = max_idx;
-  }
+  dim3 blockDim(GPU_THREADS);
+  dim3 gridDim(
+    (batch_size + blockDim.x - 1) / blockDim.x);
+  dev_top_one<<<gridDim, blockDim>>>(input, output);
 }
 
-// load the parameter binary file and store parameters into Tensors
-// Only the first process (root, node_idx == 0) has the parameter
-// You must broadcast it to the others
 void initialize_classifier(float *parameter, int N) {
   MPI_Comm_rank(MPI_COMM_WORLD, &node_idx);
   MPI_Comm_size(MPI_COMM_WORLD, &num_nodes);
@@ -306,101 +425,103 @@ void initialize_classifier(float *parameter, int N) {
   }
   MPI_Bcast(parameter, PARAMETER_SIZE, MPI_FLOAT, 0, MPI_COMM_WORLD);
 
-  w_conv1 = new Tensor({256, 70, 7}, parameter + OFFSET0);
-  b_conv1 = new Tensor({256}, parameter + OFFSET1);
-  gamma_conv1 = new Tensor({256, 1008}, parameter + OFFSET2);
-  beta_conv1 = new Tensor({256, 1008}, parameter + OFFSET3);
-  w_conv2 = new Tensor({256, 256, 7}, parameter + OFFSET4);
-  b_conv2 = new Tensor({256}, parameter + OFFSET5);
-  w_conv3 = new Tensor({256, 256, 3}, parameter + OFFSET6);
-  b_conv3 = new Tensor({256}, parameter + OFFSET7);
-  w_conv4 = new Tensor({256, 256, 3}, parameter + OFFSET8);
-  b_conv4 = new Tensor({256}, parameter + OFFSET9);
-  w_conv5 = new Tensor({256, 256, 3}, parameter + OFFSET10);
-  b_conv5 = new Tensor({256}, parameter + OFFSET11);
-  w_conv6 = new Tensor({256, 256, 3}, parameter + OFFSET12);
-  b_conv6 = new Tensor({256}, parameter + OFFSET13);
-  gamma_conv6 = new Tensor({256, 102}, parameter + OFFSET14);
-  beta_conv6 = new Tensor({256, 102}, parameter + OFFSET15);
-  w_fc1 = new Tensor({1024, 8704}, parameter + OFFSET16);
-  b_fc1 = new Tensor({1024}, parameter + OFFSET17);
-  w_fc2 = new Tensor({1024, 1024}, parameter + OFFSET18);
-  b_fc2 = new Tensor({1024}, parameter + OFFSET19);
-  w_fc3 = new Tensor({4, 1024}, parameter + OFFSET20);
-  b_fc3 = new Tensor({4}, parameter + OFFSET21);
+  cudaSetDevice(0);
 
-  a_conv1 = new Tensor({batch_size, 256, 1008});
-  a_layernorm1 = new Tensor({batch_size, 256, 1008});
-  a_relu1 = new Tensor({batch_size, 256, 1008});
-  a_pool1 = new Tensor({batch_size, 256, 336});
-  a_conv2 = new Tensor({batch_size, 256, 330});
-  a_relu2 = new Tensor({batch_size, 256, 330});
-  a_pool2 = new Tensor({batch_size, 256, 110});
-  a_conv3 = new Tensor({batch_size, 256, 108});
-  a_relu3 = new Tensor({batch_size, 256, 108});
-  a_conv4 = new Tensor({batch_size, 256, 106});
-  a_relu4 = new Tensor({batch_size, 256, 106});
-  a_conv5 = new Tensor({batch_size, 256, 104});
-  a_relu5 = new Tensor({batch_size, 256, 104});
-  a_conv6 = new Tensor({batch_size, 256, 102});
-  a_layernorm6 = new Tensor({batch_size, 256, 102});
-  a_relu6 = new Tensor({batch_size, 256, 102});
-  a_pool6 = new Tensor({batch_size, 256, 34});
-  a_collapse = new Tensor({batch_size, 8704});
-  a_linear1 = new Tensor({batch_size, 1024});
-  a_relu7 = new Tensor({batch_size, 1024});
-  a_linear2 = new Tensor({batch_size, 1024});
-  a_relu8 = new Tensor({batch_size, 1024});
-  a_linear3 = new Tensor({batch_size, 4});
-  a_topone = new Tensor({batch_size});
+  CUDA_MALLOC_PARAM(w_conv1, parameter + OFFSET0, 256, 70, 7);
+  CUDA_MALLOC_PARAM(b_conv1, parameter + OFFSET1, 256);
+  CUDA_MALLOC_PARAM(gamma_conv1, parameter + OFFSET2, 256, 1008);
+  CUDA_MALLOC_PARAM(beta_conv1, parameter + OFFSET3, 256, 1008);
+  CUDA_MALLOC_PARAM(w_conv2, parameter + OFFSET4, 256, 256, 7);
+  CUDA_MALLOC_PARAM(b_conv2, parameter + OFFSET5, 256);
+  CUDA_MALLOC_PARAM(w_conv3, parameter + OFFSET6, 256, 256, 3);
+  CUDA_MALLOC_PARAM(b_conv3, parameter + OFFSET7, 256);
+  CUDA_MALLOC_PARAM(w_conv4, parameter + OFFSET8, 256, 256, 3);
+  CUDA_MALLOC_PARAM(b_conv4, parameter + OFFSET9, 256);
+  CUDA_MALLOC_PARAM(w_conv5, parameter + OFFSET10, 256, 256, 3);
+  CUDA_MALLOC_PARAM(b_conv5, parameter + OFFSET11, 256);
+  CUDA_MALLOC_PARAM(w_conv6, parameter + OFFSET12, 256, 256, 3);
+  CUDA_MALLOC_PARAM(b_conv6, parameter + OFFSET13, 256);
+  CUDA_MALLOC_PARAM(gamma_conv6, parameter + OFFSET14, 256, 102);
+  CUDA_MALLOC_PARAM(beta_conv6, parameter + OFFSET15, 256, 102);
+  CUDA_MALLOC_PARAM(w_fc1, parameter + OFFSET16, 1024, 8704);
+  CUDA_MALLOC_PARAM(b_fc1, parameter + OFFSET17, 1024);
+  CUDA_MALLOC_PARAM(w_fc2, parameter + OFFSET18, 1024, 1024);
+  CUDA_MALLOC_PARAM(b_fc2, parameter + OFFSET19, 1024);
+  CUDA_MALLOC_PARAM(w_fc3, parameter + OFFSET20, 4, 1024);
+  CUDA_MALLOC_PARAM(b_fc3, parameter + OFFSET21, 4);
+
+  CUDA_MALLOC(a_conv1, batch_size, 256, 1008);
+  CUDA_MALLOC(a_layernorm1, batch_size, 256, 1008);
+  CUDA_MALLOC(a_relu1, batch_size, 256, 1008);
+  CUDA_MALLOC(a_pool1, batch_size, 256, 336);
+  CUDA_MALLOC(a_conv2, batch_size, 256, 330);
+  CUDA_MALLOC(a_relu2, batch_size, 256, 330);
+  CUDA_MALLOC(a_pool2, batch_size, 256, 110);
+  CUDA_MALLOC(a_conv3, batch_size, 256, 108);
+  CUDA_MALLOC(a_relu3, batch_size, 256, 108);
+  CUDA_MALLOC(a_conv4, batch_size, 256, 106);
+  CUDA_MALLOC(a_relu4, batch_size, 256, 106);
+  CUDA_MALLOC(a_conv5, batch_size, 256, 104);
+  CUDA_MALLOC(a_relu5, batch_size, 256, 104);
+  CUDA_MALLOC(a_conv6, batch_size, 256, 102);
+  CUDA_MALLOC(a_layernorm6, batch_size, 256, 102);
+  CUDA_MALLOC(a_relu6, batch_size, 256, 102);
+  CUDA_MALLOC(a_pool6, batch_size, 256, 34);
+  CUDA_MALLOC(a_collapse, batch_size, 8704);
+  CUDA_MALLOC(a_linear1, batch_size, 1024);
+  CUDA_MALLOC(a_relu7, batch_size, 1024);
+  CUDA_MALLOC(a_linear2, batch_size, 1024);
+  CUDA_MALLOC(a_relu8, batch_size, 1024);
+  CUDA_MALLOC(a_linear3, batch_size, 4);
+  CUDA_MALLOC(a_topone, batch_size);
 }
 
 // Free all dynamically allocated variables
 void finalize_classifier() {
-  delete w_conv1;
-  delete b_conv1;
-  delete w_conv2;
-  delete b_conv2;
-  delete w_conv3;
-  delete b_conv3;
-  delete w_conv4;
-  delete b_conv4;
-  delete w_conv5;
-  delete b_conv5;
-  delete w_conv6;
-  delete b_conv6;
-  delete w_fc1;
-  delete b_fc1;
-  delete w_fc2;
-  delete b_fc2;
-  delete w_fc3;
-  delete b_fc3;
-  delete gamma_conv1;
-  delete gamma_conv6;
-  delete beta_conv1;
-  delete beta_conv6;
-  delete a_conv1;
-  delete a_layernorm1;
-  delete a_relu1;
-  delete a_pool1;
-  delete a_conv2;
-  delete a_relu2;
-  delete a_pool2;
-  delete a_conv3;
-  delete a_relu3;
-  delete a_conv4;
-  delete a_relu4;
-  delete a_conv5;
-  delete a_relu5;
-  delete a_conv6;
-  delete a_layernorm6;
-  delete a_relu6;
-  delete a_pool6;
-  delete a_collapse;
-  delete a_linear1;
-  delete a_relu7;
-  delete a_linear2;
-  delete a_relu8;
-  delete a_linear3;
-  delete a_topone;
+  CUDA_DELETE(w_conv1);
+  CUDA_DELETE(b_conv1);
+  CUDA_DELETE(w_conv2);
+  CUDA_DELETE(b_conv2);
+  CUDA_DELETE(w_conv3);
+  CUDA_DELETE(b_conv3);
+  CUDA_DELETE(w_conv4);
+  CUDA_DELETE(b_conv4);
+  CUDA_DELETE(w_conv5);
+  CUDA_DELETE(b_conv5);
+  CUDA_DELETE(w_conv6);
+  CUDA_DELETE(b_conv6);
+  CUDA_DELETE(w_fc1);
+  CUDA_DELETE(b_fc1);
+  CUDA_DELETE(w_fc2);
+  CUDA_DELETE(b_fc2);
+  CUDA_DELETE(w_fc3);
+  CUDA_DELETE(b_fc3);
+  CUDA_DELETE(gamma_conv1);
+  CUDA_DELETE(gamma_conv6);
+  CUDA_DELETE(beta_conv1);
+  CUDA_DELETE(beta_conv6);
+  CUDA_DELETE(a_conv1);
+  CUDA_DELETE(a_layernorm1);
+  CUDA_DELETE(a_relu1);
+  CUDA_DELETE(a_pool1);
+  CUDA_DELETE(a_conv2);
+  CUDA_DELETE(a_relu2);
+  CUDA_DELETE(a_pool2);
+  CUDA_DELETE(a_conv3);
+  CUDA_DELETE(a_relu3);
+  CUDA_DELETE(a_conv4);
+  CUDA_DELETE(a_relu4);
+  CUDA_DELETE(a_conv5);
+  CUDA_DELETE(a_relu5);
+  CUDA_DELETE(a_conv6);
+  CUDA_DELETE(a_layernorm6);
+  CUDA_DELETE(a_relu6);
+  CUDA_DELETE(a_pool6);
+  CUDA_DELETE(a_collapse);
+  CUDA_DELETE(a_linear1);
+  CUDA_DELETE(a_relu7);
+  CUDA_DELETE(a_linear2);
+  CUDA_DELETE(a_relu8);
+  CUDA_DELETE(a_linear3);
+  CUDA_DELETE(a_topone);
 }
