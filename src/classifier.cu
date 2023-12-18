@@ -23,8 +23,10 @@
 static int batch_size;
 static int node_id, num_nodes;
 static int num_devices;
-static int article_size_per_node, articles_per_node;
-static int article_size_per_device, articles_per_device;
+
+static int input_size_per_article;
+static int articles_per_node;
+static int articles_per_device;
 
 // Multi-dimensional matrix containing fp32 elements
 struct Tensor {
@@ -125,8 +127,8 @@ void classifier(float *input_, float *output_, int N) {
   }
 
   MPI_Scatter(
-    input_ + node_id * article_size_per_node, article_size_per_node, MPI_FLOAT,
-    input_ + node_id * article_size_per_node, article_size_per_node, MPI_FLOAT,
+    input_ + node_id * articles_per_node * input_size_per_article, articles_per_node * input_size_per_article, MPI_FLOAT,
+    input_ + node_id * articles_per_node * input_size_per_article, articles_per_node * input_size_per_article, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 
   #pragma omp parallel for
@@ -135,7 +137,7 @@ void classifier(float *input_, float *output_, int N) {
 
     cudaMemcpy(
       input_tensor[dev_id]->buf,
-      input_ + node_id * article_size_per_node + dev_id * article_size_per_device,
+      input_ + (node_id * articles_per_node + dev_id * articles_per_device) * input_size_per_article,
       sizeof(float) * batch_size * VOCAB_SIZE * MAX_LENGTH,
       cudaMemcpyHostToDevice);
 
@@ -429,9 +431,9 @@ void initialize_classifier(float *parameter, int N) {
   cudaGetDeviceCount(&num_devices);
 
   articles_per_node = N / num_nodes;
-  article_size_per_node = articles_per_node * VOCAB_SIZE * MAX_LENGTH;
   articles_per_device = articles_per_node / num_devices;
-  article_size_per_device = articles_per_device * VOCAB_SIZE * MAX_LENGTH;
+
+  input_size_per_article = VOCAB_SIZE * MAX_LENGTH;
 
   batch_size = articles_per_device;
 
