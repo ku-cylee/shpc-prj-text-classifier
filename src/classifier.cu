@@ -129,6 +129,7 @@ void classifier(float *input_, float *output_, int N) {
     input_ + node_id * article_size_per_node, article_size_per_node, MPI_FLOAT,
     0, MPI_COMM_WORLD);
 
+  #pragma omp parallel for
   for (int dev_id = 0; dev_id < num_devices; dev_id++) {
     cudaSetDevice(dev_id);
 
