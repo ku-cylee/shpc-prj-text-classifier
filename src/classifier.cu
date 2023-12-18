@@ -8,11 +8,11 @@
 #define PARAMETER_SIZE  (OFFSET21 + 4)
 #define GPU_THREADS     8
 
-#define CUDA_MALLOC(TENSOR_NAME, ...)                           \
+#define CUDA_NEW(TENSOR_NAME, ...)                           \
   cudaMallocManaged((void **)&TENSOR_NAME, sizeof(Tensor));     \
   TENSOR_NAME->init_cuda({__VA_ARGS__});
 
-#define CUDA_MALLOC_PARAM(TENSOR_NAME, buf_, ...)               \
+#define CUDA_NEW_DATA(TENSOR_NAME, buf_, ...)               \
   cudaMallocManaged((void **)&TENSOR_NAME, sizeof(Tensor));     \
   TENSOR_NAME->init_cuda({__VA_ARGS__}, buf_);
 
@@ -129,7 +129,7 @@ void classifier(float *input_, float *output_, int N) {
     Tensor *batch_input;
 
     // Load one input sentence from input
-    CUDA_MALLOC_PARAM(batch_input, input_ + node_idx * article_size_per_node, {batch_size, VOCAB_SIZE, MAX_LENGTH});
+    CUDA_NEW_DATA(batch_input, input_ + node_idx * article_size_per_node, {batch_size, VOCAB_SIZE, MAX_LENGTH});
 
     // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
     conv1d(batch_input, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
@@ -427,53 +427,53 @@ void initialize_classifier(float *parameter, int N) {
 
   cudaSetDevice(0);
 
-  CUDA_MALLOC_PARAM(w_conv1, parameter + OFFSET0, 256, 70, 7);
-  CUDA_MALLOC_PARAM(b_conv1, parameter + OFFSET1, 256);
-  CUDA_MALLOC_PARAM(gamma_conv1, parameter + OFFSET2, 256, 1008);
-  CUDA_MALLOC_PARAM(beta_conv1, parameter + OFFSET3, 256, 1008);
-  CUDA_MALLOC_PARAM(w_conv2, parameter + OFFSET4, 256, 256, 7);
-  CUDA_MALLOC_PARAM(b_conv2, parameter + OFFSET5, 256);
-  CUDA_MALLOC_PARAM(w_conv3, parameter + OFFSET6, 256, 256, 3);
-  CUDA_MALLOC_PARAM(b_conv3, parameter + OFFSET7, 256);
-  CUDA_MALLOC_PARAM(w_conv4, parameter + OFFSET8, 256, 256, 3);
-  CUDA_MALLOC_PARAM(b_conv4, parameter + OFFSET9, 256);
-  CUDA_MALLOC_PARAM(w_conv5, parameter + OFFSET10, 256, 256, 3);
-  CUDA_MALLOC_PARAM(b_conv5, parameter + OFFSET11, 256);
-  CUDA_MALLOC_PARAM(w_conv6, parameter + OFFSET12, 256, 256, 3);
-  CUDA_MALLOC_PARAM(b_conv6, parameter + OFFSET13, 256);
-  CUDA_MALLOC_PARAM(gamma_conv6, parameter + OFFSET14, 256, 102);
-  CUDA_MALLOC_PARAM(beta_conv6, parameter + OFFSET15, 256, 102);
-  CUDA_MALLOC_PARAM(w_fc1, parameter + OFFSET16, 1024, 8704);
-  CUDA_MALLOC_PARAM(b_fc1, parameter + OFFSET17, 1024);
-  CUDA_MALLOC_PARAM(w_fc2, parameter + OFFSET18, 1024, 1024);
-  CUDA_MALLOC_PARAM(b_fc2, parameter + OFFSET19, 1024);
-  CUDA_MALLOC_PARAM(w_fc3, parameter + OFFSET20, 4, 1024);
-  CUDA_MALLOC_PARAM(b_fc3, parameter + OFFSET21, 4);
+  CUDA_NEW_DATA(w_conv1, parameter + OFFSET0, 256, 70, 7);
+  CUDA_NEW_DATA(b_conv1, parameter + OFFSET1, 256);
+  CUDA_NEW_DATA(gamma_conv1, parameter + OFFSET2, 256, 1008);
+  CUDA_NEW_DATA(beta_conv1, parameter + OFFSET3, 256, 1008);
+  CUDA_NEW_DATA(w_conv2, parameter + OFFSET4, 256, 256, 7);
+  CUDA_NEW_DATA(b_conv2, parameter + OFFSET5, 256);
+  CUDA_NEW_DATA(w_conv3, parameter + OFFSET6, 256, 256, 3);
+  CUDA_NEW_DATA(b_conv3, parameter + OFFSET7, 256);
+  CUDA_NEW_DATA(w_conv4, parameter + OFFSET8, 256, 256, 3);
+  CUDA_NEW_DATA(b_conv4, parameter + OFFSET9, 256);
+  CUDA_NEW_DATA(w_conv5, parameter + OFFSET10, 256, 256, 3);
+  CUDA_NEW_DATA(b_conv5, parameter + OFFSET11, 256);
+  CUDA_NEW_DATA(w_conv6, parameter + OFFSET12, 256, 256, 3);
+  CUDA_NEW_DATA(b_conv6, parameter + OFFSET13, 256);
+  CUDA_NEW_DATA(gamma_conv6, parameter + OFFSET14, 256, 102);
+  CUDA_NEW_DATA(beta_conv6, parameter + OFFSET15, 256, 102);
+  CUDA_NEW_DATA(w_fc1, parameter + OFFSET16, 1024, 8704);
+  CUDA_NEW_DATA(b_fc1, parameter + OFFSET17, 1024);
+  CUDA_NEW_DATA(w_fc2, parameter + OFFSET18, 1024, 1024);
+  CUDA_NEW_DATA(b_fc2, parameter + OFFSET19, 1024);
+  CUDA_NEW_DATA(w_fc3, parameter + OFFSET20, 4, 1024);
+  CUDA_NEW_DATA(b_fc3, parameter + OFFSET21, 4);
 
-  CUDA_MALLOC(a_conv1, batch_size, 256, 1008);
-  CUDA_MALLOC(a_layernorm1, batch_size, 256, 1008);
-  CUDA_MALLOC(a_relu1, batch_size, 256, 1008);
-  CUDA_MALLOC(a_pool1, batch_size, 256, 336);
-  CUDA_MALLOC(a_conv2, batch_size, 256, 330);
-  CUDA_MALLOC(a_relu2, batch_size, 256, 330);
-  CUDA_MALLOC(a_pool2, batch_size, 256, 110);
-  CUDA_MALLOC(a_conv3, batch_size, 256, 108);
-  CUDA_MALLOC(a_relu3, batch_size, 256, 108);
-  CUDA_MALLOC(a_conv4, batch_size, 256, 106);
-  CUDA_MALLOC(a_relu4, batch_size, 256, 106);
-  CUDA_MALLOC(a_conv5, batch_size, 256, 104);
-  CUDA_MALLOC(a_relu5, batch_size, 256, 104);
-  CUDA_MALLOC(a_conv6, batch_size, 256, 102);
-  CUDA_MALLOC(a_layernorm6, batch_size, 256, 102);
-  CUDA_MALLOC(a_relu6, batch_size, 256, 102);
-  CUDA_MALLOC(a_pool6, batch_size, 256, 34);
-  CUDA_MALLOC(a_collapse, batch_size, 8704);
-  CUDA_MALLOC(a_linear1, batch_size, 1024);
-  CUDA_MALLOC(a_relu7, batch_size, 1024);
-  CUDA_MALLOC(a_linear2, batch_size, 1024);
-  CUDA_MALLOC(a_relu8, batch_size, 1024);
-  CUDA_MALLOC(a_linear3, batch_size, 4);
-  CUDA_MALLOC(a_topone, batch_size);
+  CUDA_NEW(a_conv1, batch_size, 256, 1008);
+  CUDA_NEW(a_layernorm1, batch_size, 256, 1008);
+  CUDA_NEW(a_relu1, batch_size, 256, 1008);
+  CUDA_NEW(a_pool1, batch_size, 256, 336);
+  CUDA_NEW(a_conv2, batch_size, 256, 330);
+  CUDA_NEW(a_relu2, batch_size, 256, 330);
+  CUDA_NEW(a_pool2, batch_size, 256, 110);
+  CUDA_NEW(a_conv3, batch_size, 256, 108);
+  CUDA_NEW(a_relu3, batch_size, 256, 108);
+  CUDA_NEW(a_conv4, batch_size, 256, 106);
+  CUDA_NEW(a_relu4, batch_size, 256, 106);
+  CUDA_NEW(a_conv5, batch_size, 256, 104);
+  CUDA_NEW(a_relu5, batch_size, 256, 104);
+  CUDA_NEW(a_conv6, batch_size, 256, 102);
+  CUDA_NEW(a_layernorm6, batch_size, 256, 102);
+  CUDA_NEW(a_relu6, batch_size, 256, 102);
+  CUDA_NEW(a_pool6, batch_size, 256, 34);
+  CUDA_NEW(a_collapse, batch_size, 8704);
+  CUDA_NEW(a_linear1, batch_size, 1024);
+  CUDA_NEW(a_relu7, batch_size, 1024);
+  CUDA_NEW(a_linear2, batch_size, 1024);
+  CUDA_NEW(a_relu8, batch_size, 1024);
+  CUDA_NEW(a_linear3, batch_size, 4);
+  CUDA_NEW(a_topone, batch_size);
 }
 
 // Free all dynamically allocated variables
