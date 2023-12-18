@@ -108,15 +108,15 @@ Tensor **a_linear3;
 Tensor **a_topone;
 
 // Operations
-void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
+void conv1d(int dev_id, Tensor **input, Tensor **weight, Tensor **bias, Tensor **output,
             int stride, int padding, int dilation, bool has_bias);
-void relu(Tensor *input, Tensor *output);
-void maxpool1d(Tensor *input, Tensor *output, int kernel_size, int stride);
-void collapse(Tensor *input, Tensor *output);
-void linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
+void relu(int dev_id, Tensor **input, Tensor **output);
+void maxpool1d(int dev_id, Tensor **input, Tensor **output, int kernel_size, int stride);
+void collapse(int dev_id, Tensor **input, Tensor **output);
+void linear(int dev_id, Tensor **input, Tensor **weight, Tensor **bias, Tensor **output,
             bool has_bias);
-void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output);
-void top_one(Tensor *input, Tensor *output);
+void layernorm(int dev_id, Tensor **input, Tensor **gamma, Tensor **beta, Tensor **output);
+void top_one(int dev_id, Tensor **input, Tensor **output);
 
 void classifier(float *input_, float *output_, int N) {
   if (node_id != 0) {
@@ -140,49 +140,49 @@ void classifier(float *input_, float *output_, int N) {
       cudaMemcpyHostToDevice);
 
     // Conv block 1 : Conv1d + LayerNorm + ReLU + MaxPool1d
-    conv1d(input_tensor[dev_id], w_conv1[dev_id], b_conv1[dev_id], a_conv1[dev_id], 1, 0, 1, true);
-    layernorm(a_conv1[dev_id], gamma_conv1[dev_id], beta_conv1[dev_id], a_layernorm1[dev_id]);
-    relu(a_layernorm1[dev_id], a_relu1[dev_id]);
-    maxpool1d(a_relu1[dev_id], a_pool1[dev_id], 3, 3);
+    conv1d(dev_id, input_tensor, w_conv1, b_conv1, a_conv1, 1, 0, 1, true);
+    layernorm(dev_id, a_conv1, gamma_conv1, beta_conv1, a_layernorm1);
+    relu(dev_id, a_layernorm1, a_relu1);
+    maxpool1d(dev_id, a_relu1, a_pool1, 3, 3);
 
     // Conv block 2 : Conv1d + ReLU + MaxPool1d
-    conv1d(a_pool1[dev_id], w_conv2[dev_id], b_conv2[dev_id], a_conv2[dev_id], 1, 0, 1, true);
-    relu(a_conv2[dev_id], a_relu2[dev_id]);
-    maxpool1d(a_relu2[dev_id], a_pool2[dev_id], 3, 3);
+    conv1d(dev_id, a_pool1, w_conv2, b_conv2, a_conv2, 1, 0, 1, true);
+    relu(dev_id, a_conv2, a_relu2);
+    maxpool1d(dev_id, a_relu2, a_pool2, 3, 3);
 
     // Conv block 3 : Conv1d + ReLU
-    conv1d(a_pool2[dev_id], w_conv3[dev_id], b_conv3[dev_id], a_conv3[dev_id], 1, 0, 1, true);
-    relu(a_conv3[dev_id], a_relu3[dev_id]);
+    conv1d(dev_id, a_pool2, w_conv3, b_conv3, a_conv3, 1, 0, 1, true);
+    relu(dev_id, a_conv3, a_relu3);
 
     // Conv block 4 : Conv1d + ReLU
-    conv1d(a_relu3[dev_id], w_conv4[dev_id], b_conv4[dev_id], a_conv4[dev_id], 1, 0, 1, true);
-    relu(a_conv4[dev_id], a_relu4[dev_id]);
+    conv1d(dev_id, a_relu3, w_conv4, b_conv4, a_conv4, 1, 0, 1, true);
+    relu(dev_id, a_conv4, a_relu4);
 
     // Conv block 5 : Conv1d + ReLU
-    conv1d(a_relu4[dev_id], w_conv5[dev_id], b_conv5[dev_id], a_conv5[dev_id], 1, 0, 1, true);
-    relu(a_conv5[dev_id], a_relu5[dev_id]);
+    conv1d(dev_id, a_relu4, w_conv5, b_conv5, a_conv5, 1, 0, 1, true);
+    relu(dev_id, a_conv5, a_relu5);
 
     // Conv block 6 : Conv1d + LayerNorm + ReLU + MaxPool1d
-    conv1d(a_relu5[dev_id], w_conv6[dev_id], b_conv6[dev_id], a_conv6[dev_id], 1, 0, 1, true);
-    layernorm(a_conv6[dev_id], gamma_conv6[dev_id], beta_conv6[dev_id], a_layernorm6[dev_id]);
-    relu(a_layernorm6[dev_id], a_relu6[dev_id]);
-    maxpool1d(a_relu6[dev_id], a_pool6[dev_id], 3, 3);
+    conv1d(dev_id, a_relu5, w_conv6, b_conv6, a_conv6, 1, 0, 1, true);
+    layernorm(dev_id, a_conv6, gamma_conv6, beta_conv6, a_layernorm6);
+    relu(dev_id, a_layernorm6, a_relu6);
+    maxpool1d(dev_id, a_relu6, a_pool6, 3, 3);
 
     // Collapse
-    collapse(a_pool6[dev_id], a_collapse[dev_id]);
+    collapse(dev_id, a_pool6, a_collapse);
 
     // FC block 1 : Linear + ReLU
-    linear(a_collapse[dev_id], w_fc1[dev_id], b_fc1[dev_id], a_linear1[dev_id], true);
-    relu(a_linear1[dev_id], a_relu7[dev_id]);
+    linear(dev_id, a_collapse, w_fc1, b_fc1, a_linear1, true);
+    relu(dev_id, a_linear1, a_relu7);
 
     // FC block 2 : Linear + ReLU
-    linear(a_relu7[dev_id], w_fc2[dev_id], b_fc2[dev_id], a_linear2[dev_id], true);
-    relu(a_linear2[dev_id], a_relu8[dev_id]);
+    linear(dev_id, a_relu7, w_fc2, b_fc2, a_linear2, true);
+    relu(dev_id, a_linear2, a_relu8);
 
     // FC block 3 : Linear
-    linear(a_relu8[dev_id], w_fc3[dev_id], b_fc3[dev_id], a_linear3[dev_id], true);
+    linear(dev_id, a_relu8, w_fc3, b_fc3, a_linear3, true);
 
-    top_one(a_linear3[dev_id], a_topone[dev_id]);
+    top_one(dev_id, a_linear3, a_topone);
 
     cudaMemcpy(
       out_buffer[dev_id],
@@ -233,20 +233,20 @@ __global__ void dev_conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *
   output->buf[b * out_elem_per_batch + oc * output_length + ol] = val;
 }
 
-void conv1d(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
+void conv1d(int dev_id, Tensor **input, Tensor **weight, Tensor **bias, Tensor **output,
             int stride = 1, int padding = 0, int dilation = 1,
             bool has_bias = true) {
 
-  int out_channels = weight->shape[0];
+  int out_channels = weight[dev_id]->shape[0];
   int output_length =
-      (input->shape[2] + 2 * padding - dilation * (weight->shape[2] - 1) - 1) / stride + 1;
+      (input[dev_id]->shape[2] + 2 * padding - dilation * (weight[dev_id]->shape[2] - 1) - 1) / stride + 1;
 
   dim3 blockDim(GPU_THREADS, GPU_THREADS, GPU_THREADS);
   dim3 gridDim(
     (batch_size + blockDim.x - 1) / blockDim.x,
     (out_channels + blockDim.y - 1) / blockDim.y,
     (output_length + blockDim.z - 1) / blockDim.z);
-  dev_conv1d<<<gridDim, blockDim>>>(input, weight, bias, output, stride, padding, dilation, has_bias);
+  dev_conv1d<<<gridDim, blockDim>>>(input[dev_id], weight[dev_id], bias[dev_id], output[dev_id], stride, padding, dilation, has_bias);
 }
 
 __global__ void dev_relu(Tensor *input, Tensor *output) {
@@ -263,10 +263,12 @@ __global__ void dev_relu(Tensor *input, Tensor *output) {
   output->buf[idx] = input_val > 0.0f ? input_val : 0.0f;
 }
 
-void relu(Tensor *input, Tensor *output) {
+void relu(int dev_id, Tensor **input, Tensor **output) {
   dim3 blockDim(GPU_THREADS, GPU_THREADS);
-  dim3 gridDim((batch_size + blockDim.x - 1) / blockDim.x, (input->num_elem() / batch_size + blockDim.y - 1) / blockDim.y);
-  dev_relu<<<gridDim, blockDim>>>(input, output);
+  dim3 gridDim(
+    (batch_size + blockDim.x - 1) / blockDim.x,
+    (input[dev_id]->num_elem() / batch_size + blockDim.y - 1) / blockDim.y);
+  dev_relu<<<gridDim, blockDim>>>(input[dev_id], output[dev_id]);
 }
 
 __global__ void dev_maxpool1d(Tensor *input, Tensor *output, int kernel_size, int stride) {
@@ -291,13 +293,13 @@ __global__ void dev_maxpool1d(Tensor *input, Tensor *output, int kernel_size, in
   output->buf[(b * OC + oc) * OL + ol] = mx;
 }
 
-void maxpool1d(Tensor *input, Tensor *output, int kernel_size, int stride) {
+void maxpool1d(int dev_id, Tensor **input, Tensor **output, int kernel_size, int stride) {
   dim3 blockDim(GPU_THREADS, GPU_THREADS, GPU_THREADS);
   dim3 gridDim(
     (batch_size + blockDim.x - 1) / blockDim.x,
-    (output->shape[1] + blockDim.y - 1) / blockDim.y,
-    (output->shape[2] + blockDim.z - 1) / blockDim.z);
-  dev_maxpool1d<<<gridDim, blockDim>>>(input, output, kernel_size, stride);
+    (output[dev_id]->shape[1] + blockDim.y - 1) / blockDim.y,
+    (output[dev_id]->shape[2] + blockDim.z - 1) / blockDim.z);
+  dev_maxpool1d<<<gridDim, blockDim>>>(input[dev_id], output[dev_id], kernel_size, stride);
 }
 
 __global__ void dev_collapse(Tensor *input, Tensor *output) {
@@ -313,14 +315,14 @@ __global__ void dev_collapse(Tensor *input, Tensor *output) {
   output->buf[idx] = input->buf[idx];
 }
 
-void collapse(Tensor *input, Tensor *output) {
-  int elem_per_batch = input->num_elem() / batch_size;
+void collapse(int dev_id, Tensor **input, Tensor **output) {
+  int elem_per_batch = input[dev_id]->num_elem() / batch_size;
 
   dim3 blockDim(GPU_THREADS, GPU_THREADS);
   dim3 gridDim(
     (batch_size + blockDim.x - 1) / blockDim.x,
     (elem_per_batch + blockDim.y - 1) / blockDim.y);
-  dev_collapse<<<gridDim, blockDim>>>(input, output);
+  dev_collapse<<<gridDim, blockDim>>>(input[dev_id], output[dev_id]);
 }
 
 __global__ void dev_linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
@@ -342,13 +344,13 @@ __global__ void dev_linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *
   output->buf[b * OC + oc] = val;
 }
 
-void linear(Tensor *input, Tensor *weight, Tensor *bias, Tensor *output,
+void linear(int dev_id, Tensor **input, Tensor **weight, Tensor **bias, Tensor **output,
             bool has_bias) {
   dim3 blockDim(GPU_THREADS, GPU_THREADS);
   dim3 gridDim(
     (batch_size + blockDim.x - 1) / blockDim.x,
-    (output->shape[1] + blockDim.y - 1) / blockDim.y);
-  dev_linear<<<gridDim, blockDim>>>(input, weight, bias, output, has_bias);
+    (output[dev_id]->shape[1] + blockDim.y - 1) / blockDim.y);
+  dev_linear<<<gridDim, blockDim>>>(input[dev_id], weight[dev_id], bias[dev_id], output[dev_id], has_bias);
 }
 
 __global__ void dev_layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
@@ -384,11 +386,11 @@ __global__ void dev_layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor
   }
 }
 
-void layernorm(Tensor *input, Tensor *gamma, Tensor *beta, Tensor *output) {
+void layernorm(int dev_id, Tensor **input, Tensor **gamma, Tensor **beta, Tensor **output) {
   dim3 blockDim(GPU_THREADS);
   dim3 gridDim(
     (batch_size + blockDim.x - 1) / blockDim.x);
-  dev_layernorm<<<gridDim, blockDim>>>(input, gamma, beta, output);
+  dev_layernorm<<<gridDim, blockDim>>>(input[dev_id], gamma[dev_id], beta[dev_id], output[dev_id]);
 }
 
 __global__ void dev_top_one(Tensor *input, Tensor *output) {
@@ -413,11 +415,11 @@ __global__ void dev_top_one(Tensor *input, Tensor *output) {
   output->buf[b] = max_idx;
 }
 
-void top_one(Tensor *input, Tensor *output) {
+void top_one(int dev_id, Tensor **input, Tensor **output) {
   dim3 blockDim(GPU_THREADS);
   dim3 gridDim(
     (batch_size + blockDim.x - 1) / blockDim.x);
-  dev_top_one<<<gridDim, blockDim>>>(input, output);
+  dev_top_one<<<gridDim, blockDim>>>(input[dev_id], output[dev_id]);
 }
 
 void initialize_classifier(float *parameter, int N) {
